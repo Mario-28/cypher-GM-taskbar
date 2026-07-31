@@ -3406,3 +3406,7 @@
 }
 
 /* ── Effects Panel ── */
+
+.cgm-tools-box{display:flex;align-items:center;gap:6px;margin-left:8px}.cgm-registered-tool-btn{display:inline-flex;align-items:center;justify-content:center}
+
+.cgm-section .cgm-cypherlog-btn{margin-left:8px}

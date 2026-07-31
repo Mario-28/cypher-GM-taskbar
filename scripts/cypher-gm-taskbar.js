@@ -8,6 +8,23 @@
 
 const MODULE_ID = "cypher-gm-taskbar";
 
+class CGMToolRegistry {
+  constructor(taskbar) { this.taskbar = taskbar; this.tools = new Map(); }
+  register(tool) {
+    if (!tool?.id) throw new Error(`${MODULE_ID} | Tool registration requires an id.`);
+    if (typeof tool.onClick !== 'function') throw new Error(`${MODULE_ID} | Tool '${tool.id}' requires onClick().`);
+    const normalized = { id: tool.id, label: tool.label ?? tool.id, icon: tool.icon ?? 'fa-puzzle-piece', order: Number.isFinite(tool.order) ? tool.order : 100, group: tool.group ?? 'utilities', visible: typeof tool.visible === 'function' ? tool.visible : (() => true), tooltip: tool.tooltip ?? tool.label ?? tool.id, onClick: tool.onClick, meta: tool.meta ?? {} };
+    this.tools.set(normalized.id, normalized);
+    Hooks.callAll(`${MODULE_ID}.toolRegistered`, normalized, game[MODULE_ID]);
+    this.taskbar?.render?.();
+    return normalized;
+  }
+  unregister(toolId) { const existed = this.tools.delete(toolId); if (existed) { Hooks.callAll(`${MODULE_ID}.toolUnregistered`, toolId, game[MODULE_ID]); this.taskbar?.render?.(); } return existed; }
+  get(toolId) { return this.tools.get(toolId) || null; }
+  list() { return Array.from(this.tools.values()).sort((a,b)=>a.order-b.order || a.label.localeCompare(b.label)); }
+  visibleTools() { return this.list().filter(tool => { try { return !!tool.visible(); } catch { return false; } }); }
+}
+
 class GMTaskbar {
   constructor() {
     this.element = null;
@@ -76,6 +93,7 @@ class GMTaskbar {
     this._loadSettings();
     this._loadActorNotes();
     this._loadPanelPositions();
+    this._toolRegistry = new CGMToolRegistry(this);
   }
 
   /* Load saved panel positions from localStorage */
@@ -175,6 +193,7 @@ class GMTaskbar {
     this._applySettings();
     this._bindEvents();
     this._bindPortraitEvents();
+    this._bindRegisteredToolEvents?.();
     this._startConnectionMonitor();
     this._setupAutoHide();
 
@@ -5167,6 +5186,24 @@ Hooks.once("init", () => {
   registerSettings();
 });
 
+function buildTaskbarAPI(taskbarInstance) {
+  return {
+    version: '3.19.0',
+    registerTool(tool) { return taskbarInstance._toolRegistry.register(tool); },
+    unregisterTool(toolId) { return taskbarInstance._toolRegistry.unregister(toolId); },
+    getTool(toolId) { return taskbarInstance._toolRegistry.get(toolId); },
+    listTools() { return taskbarInstance._toolRegistry.list(); },
+    openTool(toolId, options = {}) {
+      const tool = taskbarInstance._toolRegistry.get(toolId);
+      if (!tool) throw new Error(`${MODULE_ID} | Tool '${toolId}' not found.`);
+      return tool.onClick({ event: null, tool, api: game[MODULE_ID], taskbar: taskbarInstance, options });
+    },
+    addToolbarButton(tool) { return taskbarInstance._toolRegistry.register(tool); },
+    render() { return taskbarInstance.render(); },
+    instance: taskbarInstance
+  };
+}
+
 Hooks.once("ready", () => {
   if (!game.user?.isGM) { console.log(`${MODULE_ID} | User is not GM — taskbar skipped`); return; }
   const disabled = (() => { try { return game.settings.get(MODULE_ID, "disableGMTaskbar"); } catch { return false; } })();
@@ -5261,3 +5298,36 @@ Hooks.on("renderRollEngineDialogSheet", (app, html, data) => {
     }
   }
 });
+
+
+GMTaskbar.prototype._buildRegisteredToolsHTML = function() {
+  const tools = this._toolRegistry?.visibleTools?.() || [];
+  if (!tools.length) return '';
+  return `
+    <div class="cgm-tools-box" aria-label="Registered Tools">
+      ${tools.map(tool => `
+        <button class="cgm-icon-btn cgm-registered-tool-btn" data-tool-id="${tool.id}" title="${tool.tooltip}">
+          <i class="fas ${tool.icon}"></i>
+        </button>
+      `).join('')}
+    </div>
+  `;
+};
+GMTaskbar.prototype._bindRegisteredToolEvents = function() {
+  if (!this.element) return;
+  this.element.querySelectorAll('.cgm-registered-tool-btn[data-tool-id]').forEach(btn => {
+    btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const toolId = btn.dataset.toolId;
+      const tool = this._toolRegistry?.get(toolId);
+      if (!tool) return;
+      try {
+        tool.onClick({ event: ev, tool, api: game[MODULE_ID], taskbar: this });
+        Hooks.callAll(`${MODULE_ID}.toolClicked`, tool, game[MODULE_ID]);
+      } catch (err) {
+        console.error(`${MODULE_ID} | Tool '${toolId}' click failed`, err);
+        ui.notifications?.error?.(`Taskbar tool '${tool.label}' failed.`);
+      }
+    });
+  });
+};
