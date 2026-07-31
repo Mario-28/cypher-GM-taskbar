@@ -1,0 +1,34 @@
+{
+  "id": "cypher-gm-taskbar",
+  "title": "Cypher GM Taskbar",
+  "description": "A GM-only taskbar for the Cypher System with party overview, combat tracker, intrusions, cyphers, recovery, and quick-reference panels.",
+  "version": "3.17.21",
+  "type": "module",
+  "authors": [{ "name": "Cypher GM Taskbar" }],
+  "compatibility": {
+    "minimum": "13",
+    "verified": "14",
+    "maximum": "15"
+  },
+  "relationships": {
+    "systems": [
+      {
+        "id": "cyphersystem",
+        "type": "system",
+        "compatibility": { "minimum": "2" }
+      }
+    ]
+  },
+  "scripts": ["scripts/cypher-gm-taskbar.js"],
+  "styles": ["styles/cypher-gm-taskbar.css"],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    }
+  ],
+  "socket": false,
+  "readme": "README.md",
+  "license": "LICENSE"
+}

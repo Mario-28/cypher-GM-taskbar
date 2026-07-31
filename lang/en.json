@@ -1,0 +1,12 @@
+{
+  "cypher-gm-taskbar": {
+    "party": "Party",
+    "combat": "Combat",
+    "intrusions": "Intrusions",
+    "cyphers": "Cyphers",
+    "recovery": "Recovery",
+    "npcs": "NPCs",
+    "notes": "Notes",
+    "settings": "Settings"
+  }
+}
