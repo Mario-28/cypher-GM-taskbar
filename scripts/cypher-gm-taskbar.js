@@ -1,5 +1,5 @@
 /**
- * Cypher GM Taskbar v3.17.21
+ * Cypher GM Taskbar v3.25.0
  * Foundry VTT v13+ | Cypher System
  *
  * GM-only taskbar with combat tracker, intrusions, cyphers, recovery,
@@ -7,23 +7,6 @@
  */
 
 const MODULE_ID = "cypher-gm-taskbar";
-
-class CGMToolRegistry {
-  constructor(taskbar) { this.taskbar = taskbar; this.tools = new Map(); }
-  register(tool) {
-    if (!tool?.id) throw new Error(`${MODULE_ID} | Tool registration requires an id.`);
-    if (typeof tool.onClick !== 'function') throw new Error(`${MODULE_ID} | Tool '${tool.id}' requires onClick().`);
-    const normalized = { id: tool.id, label: tool.label ?? tool.id, icon: tool.icon ?? 'fa-puzzle-piece', order: Number.isFinite(tool.order) ? tool.order : 100, group: tool.group ?? 'utilities', visible: typeof tool.visible === 'function' ? tool.visible : (() => true), tooltip: tool.tooltip ?? tool.label ?? tool.id, onClick: tool.onClick, meta: tool.meta ?? {} };
-    this.tools.set(normalized.id, normalized);
-    Hooks.callAll(`${MODULE_ID}.toolRegistered`, normalized, game[MODULE_ID]);
-    this.taskbar?.render?.();
-    return normalized;
-  }
-  unregister(toolId) { const existed = this.tools.delete(toolId); if (existed) { Hooks.callAll(`${MODULE_ID}.toolUnregistered`, toolId, game[MODULE_ID]); this.taskbar?.render?.(); } return existed; }
-  get(toolId) { return this.tools.get(toolId) || null; }
-  list() { return Array.from(this.tools.values()).sort((a,b)=>a.order-b.order || a.label.localeCompare(b.label)); }
-  visibleTools() { return this.list().filter(tool => { try { return !!tool.visible(); } catch { return false; } }); }
-}
 
 class GMTaskbar {
   constructor() {
@@ -67,9 +50,13 @@ class GMTaskbar {
     this._notesPanelEl = null;
     // Section settings (extensible for multiple sections)
     this._sections = [
-      { id: "section1", name: "SECTION 1", width: 10, bgColor: "#ffffff", bgOpacity: 30 }
+      { id: "section1", name: "SECTION 1", width: 10, bgColor: "#ffffff", bgOpacity: 30 },
+      { id: "section2", name: "SECTION 2", width: 10, bgColor: "#ffffff", bgOpacity: 30 }
     ];
     this._notesPanelPos = null;
+    this._portraitVisibilityMode = this._gs("portraitVisibilityMode", "all");
+    this._disconnectedActors = new Set();
+    this._disconnectionSounds = new Map(); // actorId -> sound instance
     this._notesLineStart = null;
     this._targetPanelEl = null;
     this._targetPanelPos = null;
@@ -93,7 +80,6 @@ class GMTaskbar {
     this._loadSettings();
     this._loadActorNotes();
     this._loadPanelPositions();
-    this._toolRegistry = new CGMToolRegistry(this);
   }
 
   /* Load saved panel positions from localStorage */
@@ -170,6 +156,12 @@ class GMTaskbar {
     this._sections[0].width = this._gs("sectionWidth", 10);
     this._sections[0].bgColor = this._gs("sectionBgColor", "#ffffff");
     this._sections[0].bgOpacity = this._gs("sectionBgOpacity", 30);
+    this._sections[0].position = this._gs("sectionPosition", 0);
+    // Load SECTION 2 settings
+    this._sections[1].width = this._gs("section2Width", 10);
+    this._sections[1].bgColor = this._gs("section2BgColor", "#ffffff");
+    this._sections[1].bgOpacity = this._gs("section2BgOpacity", 30);
+    this._sections[1].position = this._gs("section2Position", 0);
     this._settingsTab = "general";
   }
 
@@ -179,6 +171,7 @@ class GMTaskbar {
     document.querySelector(`#${MODULE_ID}-bar`)?.remove();
     document.querySelector(`.cgm-panel`)?.remove();
     if (this._connInterval) clearInterval(this._connInterval);
+    if (this._playerMonitorInterval) clearInterval(this._playerMonitorInterval);
     if (this._autoHideTimer) clearTimeout(this._autoHideTimer);
 
     const bar = document.createElement("div");
@@ -193,8 +186,8 @@ class GMTaskbar {
     this._applySettings();
     this._bindEvents();
     this._bindPortraitEvents();
-    this._bindRegisteredToolEvents?.();
     this._startConnectionMonitor();
+    this._startPlayerMonitor();
     this._setupAutoHide();
 
     if (this.activePanel) this._openPanel(this.activePanel);
@@ -220,6 +213,24 @@ class GMTaskbar {
     const lockTitle = this._locked ? "Taskbar locked (visible)" : "Taskbar unlocked (auto-hide)";
     const gd = this._globalDifficulty;
     const tn = gd * 3;
+    const secHTML = this._buildSectionHTML(0, `
+      <button class="cgm-section-btn cgm-section-btn-quickscene" data-action="openQuickScene" title="Quick Scene">
+        <i class="fas fa-dice-d20"></i>
+      </button>
+    `);
+    const sec2HTML = this._buildSectionHTML(1, `
+      ${game.modules?.get("cypher-log")?.active ? `
+      <button class="cgm-section-btn cgm-section-btn-log cl-gm-taskbar-btn" data-action="openCypherLog" title="Cypher Log">
+        <i class="fa-solid fa-book-open"></i>
+      </button>
+      ` : ""}
+      <button class="cgm-section-btn cgm-section-btn-scene" data-action="openSceneControl" title="Scene Control">
+        <i class="fas fa-map"></i>
+      </button>
+      <button class="cgm-section-btn cgm-section-btn-npc" data-action="openNPCCanvas" title="NPC Canvas">
+        <i class="fas fa-users"></i>
+      </button>
+    `);
 
     return `
       <!-- Floating player portraits above bar -->
@@ -249,10 +260,29 @@ class GMTaskbar {
           </button>
         </div>
 
-        <div class="cgm-spacer"></div>
+        <!-- Eye icon: Actor visibility toggle -->
+        <div class="cgm-eye-wrap">
+          <button class="cgm-icon-btn cgm-eye-btn ${this._portraitVisibilityMode === 'hide' ? 'cgm-eye-hidden' : this._portraitVisibilityMode === 'active' ? 'cgm-eye-active' : ''}" data-action="toggleActorVisibility" title="Actor visibility">
+            <i class="fas ${this._portraitVisibilityMode === 'hide' ? 'fa-eye-slash' : 'fa-eye'}"></i>
+          </button>
+          <div class="cgm-eye-menu">
+            <div class="cgm-eye-menu-item ${this._portraitVisibilityMode === 'active' ? 'cgm-eye-menu-active' : ''}" data-action="setActorVisibility" data-mode="active">
+              <i class="fas fa-user-check"></i> SHOW ONLY ACTIVE ACTORS
+            </div>
+            <div class="cgm-eye-menu-item ${this._portraitVisibilityMode === 'all' ? 'cgm-eye-menu-active' : ''}" data-action="setActorVisibility" data-mode="all">
+              <i class="fas fa-users"></i> SHOW ALL ACTORS
+            </div>
+            <div class="cgm-eye-menu-item ${this._portraitVisibilityMode === 'hide' ? 'cgm-eye-menu-active' : ''}" data-action="setActorVisibility" data-mode="hide">
+              <i class="fas fa-user-slash"></i> HIDE ALL ACTORS
+            </div>
+          </div>
+        </div>
 
         <!-- SECTION 1 -->
-        ${this._buildSectionHTML(0)}
+        ${secHTML}
+
+        <!-- SECTION 2 -->
+        ${sec2HTML}
 
         <div class="cgm-spacer"></div>
 
@@ -283,19 +313,19 @@ class GMTaskbar {
   }
 
   /* ─── Section HTML Builder ─── */
-  _buildSectionHTML(index) {
+  _buildSectionHTML(index, extraButtons = "") {
     const sec = this._sections[index];
     if (!sec) return "";
     const rgb = this._hexToRgb(sec.bgColor);
     const bgStyle = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${sec.bgOpacity / 100})` : `rgba(255,255,255,${sec.bgOpacity / 100})`;
+    const posOffset = sec.position ?? 0;
+    const posStyle = posOffset > 0 ? `margin-left: ${posOffset}px;` : "";
     return `
-      <div class="cgm-custom-section" title="${sec.name}" style="width: ${sec.width}%; background: ${bgStyle};">
+      <div class="cgm-custom-section" title="${sec.name}" style="width: ${sec.width}%; background: ${bgStyle}; ${posStyle}">
         <div class="cgm-section-separator cgm-sep-left"></div>
         <div class="cgm-section-content">
           <div class="cgm-section-buttons">
-            <button class="cgm-section-btn" data-action="openNameGenerator" title="Open Name Generator">
-              <i class="fas fa-signature"></i>
-            </button>
+            ${extraButtons}
           </div>
         </div>
         <div class="cgm-section-separator cgm-sep-right"></div>
@@ -315,8 +345,30 @@ class GMTaskbar {
   /* ─── Floating Portraits (above bar, left side) ─── */
 
   _buildPortraitsFloat() {
-    const pcs = this._getPartyData();
+    let pcs = this._getPartyData();
     if (!pcs.length) return ``;
+
+    // Filter based on visibility mode
+    if (this._portraitVisibilityMode === "hide") {
+      return ``;
+    } else if (this._portraitVisibilityMode === "active") {
+      // Get all actors owned by currently connected (active) players
+      const activeUsers = game.users?.filter(u => u.active && !u.isGM) || [];
+      const activeActorIds = new Set();
+      activeUsers.forEach(user => {
+        if (user.character?.id) activeActorIds.add(user.character.id);
+        game.actors?.forEach(actor => {
+          if (actor.hasPlayerOwner && actor.testUserPermission(user, "OWNER")) {
+            activeActorIds.add(actor.id);
+          }
+        });
+      });
+      // Include disconnected actors (they show red)
+      const disconnectedIds = this._disconnectedActors || new Set();
+      pcs = pcs.filter(pc => activeActorIds.has(pc.id) || disconnectedIds.has(pc.id));
+      if (!pcs.length) return ``;
+    }
+
     const size = this._portraitSize;
     const fit = this._portraitObjectFit;
     const nameAbove = this._portraitNameAbove;
@@ -344,9 +396,11 @@ class GMTaskbar {
           const xpCircle = this._buildXPCircle(pc.xp, xpSize);
           const actor = game.actors.get(pc.id);
           const individualDiff = actor?.getFlag("cypher-gm-taskbar", "targetDifficulty") ?? 0;
+          const isDisconnected = this._disconnectedActors?.has(pc.id);
           return `
-          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''}" data-actor-id="${pc.id}">
+          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isDisconnected ? 'cgm-portrait-disconnected' : ''}" data-actor-id="${pc.id}">
             <div class="cgm-portrait-difficulty ${individualDiff > 0 ? 'cgm-difficulty-active' : ''}">${individualDiff > 0 ? individualDiff : ''}</div>
+            ${isDisconnected ? '<div class="cgm-offline-badge"><i class="fas fa-wifi-slash"></i></div>' : ''}
             <div class="cgm-portrait-img-wrap ${shapeCls}" style="width:${size}px;height:${size}px;">
               <img src="${pc.img}" alt="${pc.name}" class="cgm-portrait-img"
                    style="border-color: ${bColor}; border-width: ${borderWidth}px; object-fit: ${fit};">
@@ -616,6 +670,11 @@ ${paths}  </svg>
             <stop offset="0%" stop-color="rgba(20,22,35,0.3)" />
             <stop offset="100%" stop-color="rgba(15,17,30,0.95)" />
           </radialGradient>
+          <linearGradient id="cgm-callroll-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#1a1a1a" />
+            <stop offset="50%" stop-color="#4a0000" />
+            <stop offset="100%" stop-color="#cc0000" />
+          </linearGradient>
         </defs>
         <circle cx="0" cy="0" r="${outerR}" fill="url(#cgm-pie-bg)" stroke="rgba(200,169,110,0.15)" stroke-width="1" />
         ${svgPaths}
@@ -656,20 +715,21 @@ ${paths}  </svg>
         if (action === "intrusion") {
           const a = game.actors.get(id);
           if (a) {
-            ChatMessage.create({
-              speaker: { actor: id, alias: a.name },
-              content: `<div style="padding:10px 14px;background:rgba(217,64,64,0.08);border:1px solid rgba(217,64,64,0.25);border-radius:8px;">
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                  <i class="fas fa-bolt" style="color:#ff4444;font-size:16px;"></i>
-                  <strong style="color:#ff6666;font-size:14px;">GM Intrusion — ${a.name}</strong>
-                </div>
-                <div style="color:#aaa;font-size:12px;line-height:1.5;">
-                  The GM has triggered an intrusion on this character.<br>
-                  <span style="color:#c8a96e;">Accept</span> to gain 1 XP (if under cap) or <span style="color:#ff6666;">Decline</span> by paying 1 XP.
-                </div>
-              </div>`
-            });
-            ui.notifications.info(`Intrusion sent for ${a.name}`);
+            // Send intrusion request to player via socket (not chat)
+            const owners = game.users.filter(u => !u.isGM && a.testUserPermission(u, "OWNER"));
+            if (owners.length === 0) {
+              ui.notifications.warn(`${a.name} has no player owner online.`);
+              return;
+            }
+            for (const user of owners) {
+              game.socket.emit("module.cypher-gm-taskbar", {
+                action: "requestIntrusion",
+                userId: user.id,
+                actorId: a.id,
+                actorUuid: a.uuid
+              });
+            }
+            ui.notifications.info(`Intrusion request sent to ${a.name}'s player.`);
           }
         }
       }
@@ -1096,10 +1156,15 @@ ${paths}  </svg>
       `;
     });
 
-    // Get armor
+    // Get armor — try multiple possible paths in Cypher System
     let armor = 0;
     try {
-      armor = Number(foundry.utils.getProperty(actor, "system.combat.armor") ?? 0);
+      const raw = foundry.utils.getProperty(actor, "system.combat.armor")
+        ?? foundry.utils.getProperty(actor, "system.armor")
+        ?? foundry.utils.getProperty(actor, "system.pools.armor.value")
+        ?? foundry.utils.getProperty(actor, "system.stats.armor.value")
+        ?? 0;
+      armor = parseInt(raw) || 0;
     } catch {}
 
     // Center button with armor display
@@ -1883,27 +1948,26 @@ ${paths}  </svg>
     const poolName = poolKey.charAt(0).toUpperCase() + poolKey.slice(1);
     const gmDifficulty = this._getGMDifficulty(actor);
 
-    await ChatMessage.create({
-      speaker: { actor: actor.id, alias: actor.name },
-      content: `<div style="padding:10px 14px;background:rgba(200,169,110,0.12);border:1px solid rgba(200,169,110,0.35);border-radius:8px;">
-        <div style="font-size:1.05em;font-weight:700;color:#8a6e3e;margin-bottom:4px;"><i class="fas fa-dice-d20"></i> GM Call for Roll</div>
-        <div style="color:#000000;"><strong>${actor.name}</strong> — the GM is requesting a <strong>${poolName}</strong> roll.</div>
-      </div>`
-    });
-    ui.notifications.info(`GM requests ${actor.name} to roll ${poolName}.`);
-
-    // Try Cypher Taskbar's native dialog first
-    const ctb = window.CypherTaskbar?.instance;
-    if (ctb && typeof ctb._openNativeAttributeRollDialog === "function") {
-      try {
-        await ctb._openNativeAttributeRollDialog(actor, poolName, { presetDifficulty: gmDifficulty });
-        return;
-      } catch (err) {
-        console.warn("[CypherGMTaskbar] CypherTaskbar dialog failed:", err);
-      }
+    // Only send to the owning player(s), not chat
+    const owners = game.users.filter(u => !u.isGM && actor.testUserPermission(u, "OWNER"));
+    if (owners.length === 0) {
+      ui.notifications.warn(`${actor.name} has no player owner online.`);
+      return;
     }
-    // Fallback: open our own simple roll dialog
-    await this._openFallbackPoolDialog(actor, poolName);
+
+    // Emit roll request to each owner player
+    for (const user of owners) {
+      game.socket.emit("module.cypher-gm-taskbar", {
+        action: "callForRollPool",
+        userId: user.id,
+        actorId: actor.id,
+        actorUuid: actor.uuid,
+        poolName,
+        poolKey,
+        difficulty: gmDifficulty
+      });
+    }
+    ui.notifications.info(`Roll request sent to ${actor.name}'s player.`);
   }
 
   /* ─── Execute Skill Roll ─── */
@@ -1911,29 +1975,30 @@ ${paths}  </svg>
     const skillName = skillItem.name;
     const gmDifficulty = this._getGMDifficulty(actor);
 
-    await ChatMessage.create({
-      speaker: { actor: actor.id, alias: actor.name },
-      content: `<div style="padding:10px 14px;background:rgba(200,169,110,0.12);border:1px solid rgba(200,169,110,0.35);border-radius:8px;">
-        <div style="font-size:1.05em;font-weight:700;color:#8a6e3e;margin-bottom:4px;"><i class="fas fa-dice-d20"></i> GM Call for Roll</div>
-        <div style="color:#000000;"><strong>${actor.name}</strong> — the GM is requesting a <strong>${skillName}</strong> roll.</div>
-      </div>`
-    });
-    ui.notifications.info(`GM requests ${actor.name} to roll ${skillName}.`);
-
-    // Try Cypher Taskbar's native dialog first
-    const ctb = window.CypherTaskbar?.instance;
-    if (ctb && typeof ctb._openNativeSkillRollDialog === "function") {
-      try {
-        await ctb._openNativeSkillRollDialog(actor, skillItem, gmDifficulty);
-        return;
-      } catch (err) {
-        console.warn("[CypherGMTaskbar] CypherTaskbar dialog failed:", err);
-      }
+    // Only send to the owning player(s), not chat
+    const owners = game.users.filter(u => !u.isGM && actor.testUserPermission(u, "OWNER"));
+    if (owners.length === 0) {
+      ui.notifications.warn(`${actor.name} has no player owner online.`);
+      return;
     }
-    // Fallback: open our own simple roll dialog
-    await this._openFallbackSkillDialog(actor, skillItem);
+
+    // Emit roll request to each owner player
+    for (const user of owners) {
+      game.socket.emit("module.cypher-gm-taskbar", {
+        action: "callForRollSkill",
+        userId: user.id,
+        actorId: actor.id,
+        actorUuid: actor.uuid,
+        skillId: skillItem.id,
+        skillUuid: skillItem.uuid,
+        skillName: skillItem.name,
+        difficulty: gmDifficulty
+      });
+    }
+    ui.notifications.info(`Skill roll request (${skillName}) sent to ${actor.name}'s player.`);
   }
 
+  /* ─── Try to open Cypher Taskbar roll dialog ─── */
   /* ─── Get GM Difficulty for Roll Dialogs ─── */
   _getGMDifficulty(actor) {
     if (!actor) return null;
@@ -1942,156 +2007,6 @@ ${paths}  </svg>
     if (Number.isFinite(individual)) return Math.max(0, Math.min(15, individual));
     // 2. Global difficulty from GM Taskbar settings
     return this._globalDifficulty ?? null;
-  }
-
-  /* ─── Fallback Pool Dialog ─── */
-  async _openFallbackPoolDialog(actor, poolName) {
-    const poolKey = poolName.toLowerCase();
-    const poolData = actor.system?.pools?.[poolKey] ?? {};
-    const poolValue = poolData.value ?? poolData.current ?? 0;
-    const edge = poolData.edge ?? 0;
-    const effortCap = Math.max(0, Math.min(6, Number(actor?.system?.basic?.effort ?? actor?.system?.advancement?.effort ?? 0) || 0));
-
-    const content = `
-      <form class="cgm-roll-form">
-        <div style="display:flex;flex-direction:column;gap:10px;padding:4px;font-family:'Signika','Palatino Linotype',serif;">
-          <div style="text-align:center;color:#8a6e3e;font-weight:700;font-size:1.1em;"><i class="fas fa-dice-d20"></i> ${poolName} Roll — ${actor.name}</div>
-          <div style="display:flex;justify-content:center;gap:16px;font-size:0.85em;color:#555;">
-            <span>Pool: ${poolValue}</span><span>Edge: ${edge}</span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Difficulty</span><select name="baseDifficulty" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2,3,4,5,6,7,8,9,10].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Assets</span><select name="assets" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Effort</span><select name="effort" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${Array.from({length:effortCap+1},(_,v)=>`<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Ease</span><select name="easedBy" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2,3,4,5,6].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-          </div>
-          <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Hindrance</span><select name="hinderedBy" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2,3,4,5,6].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-        </div>
-      </form>`;
-
-    return new Promise(resolve => {
-      new Dialog({
-        title: `Roll ${poolName}`,
-        content,
-        buttons: {
-          roll: { icon: '<i class="fas fa-dice-d20"></i>', label: 'Roll', callback: async html => {
-            const form = html?.[0]?.querySelector?.('.cgm-roll-form');
-            if (!form) return resolve(null);
-            const data = Object.fromEntries(new FormData(form).entries());
-            await this._performFallbackRoll(actor, poolName, null, data);
-            resolve(true);
-          }},
-          cancel: { icon: '<i class="fas fa-times"></i>', label: 'Cancel', callback: () => resolve(null) }
-        },
-        default: 'roll'
-      }).render(true);
-    });
-  }
-
-  /* ─── Fallback Skill Dialog ─── */
-  async _openFallbackSkillDialog(actor, skillItem) {
-    const skillName = skillItem.name;
-    const poolMeta = this._detectSkillPoolMeta(skillItem);
-    const defaultPool = poolMeta.pool || "Might";
-    const effortCap = Math.max(0, Math.min(6, Number(actor?.system?.basic?.effort ?? actor?.system?.advancement?.effort ?? 0) || 0));
-    const rating = (skillItem.system?.basic?.rating || "").toLowerCase();
-    let skillStep = 0;
-    if (rating.includes("specialized")) skillStep = 2;
-    else if (rating.includes("trained")) skillStep = 1;
-    else if (rating.includes("inability")) skillStep = -1;
-
-    const content = `
-      <form class="cgm-roll-form">
-        <div style="display:flex;flex-direction:column;gap:10px;padding:4px;font-family:'Signika','Palatino Linotype',serif;">
-          <div style="text-align:center;color:#8a6e3e;font-weight:700;font-size:1.1em;"><i class="fas fa-dice-d20"></i> ${skillName} — ${actor.name}</div>
-          <div style="display:flex;justify-content:center;gap:16px;font-size:0.85em;color:#555;">
-            <span>Pool: ${defaultPool}</span><span>Step: ${skillStep >= 0 ? '+' + skillStep : skillStep}</span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Pool</span><select name="pool" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${['Might','Speed','Intellect'].map(p => `<option value="${p}" ${p===defaultPool?'selected':''}>${p}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Difficulty</span><select name="baseDifficulty" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2,3,4,5,6,7,8,9,10].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Assets</span><select name="assets" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Effort</span><select name="effort" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${Array.from({length:effortCap+1},(_,v)=>`<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Ease</span><select name="easedBy" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2,3,4,5,6].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-            <label style="display:flex;flex-direction:column;gap:2px;font-size:0.8em;color:#333;"><span>Hindrance</span><select name="hinderedBy" style="background:#f5f2eb;border:1px solid #d4c9a8;border-radius:6px;padding:4px 6px;color:#222;">${[0,1,2,3,4,5,6].map(v => `<option value="${v}" ${v===0?'selected':''}>${v}</option>`).join('')}</select></label>
-          </div>
-        </div>
-      </form>`;
-
-    return new Promise(resolve => {
-      new Dialog({
-        title: `Roll ${skillName}`,
-        content,
-        buttons: {
-          roll: { icon: '<i class="fas fa-dice-d20"></i>', label: 'Roll', callback: async html => {
-            const form = html?.[0]?.querySelector?.('.cgm-roll-form');
-            if (!form) return resolve(null);
-            const data = Object.fromEntries(new FormData(form).entries());
-            await this._performFallbackRoll(actor, data.pool || defaultPool, skillItem, data);
-            resolve(true);
-          }},
-          cancel: { icon: '<i class="fas fa-times"></i>', label: 'Cancel', callback: () => resolve(null) }
-        },
-        default: 'roll'
-      }).render(true);
-    });
-  }
-
-  /* ─── Perform Fallback Roll ─── */
-  async _performFallbackRoll(actor, poolName, skillItem, options) {
-    const baseDifficulty = Number(options.baseDifficulty) || 0;
-    const assets = Number(options.assets) || 0;
-    const effort = Number(options.effort) || 0;
-    const easedBy = Number(options.easedBy) || 0;
-    const hinderedBy = Number(options.hinderedBy) || 0;
-    const poolKey = poolName.toLowerCase();
-    const poolData = actor.system?.pools?.[poolKey] ?? {};
-    const edge = poolData.edge ?? 0;
-    const poolValue = poolData.value ?? poolData.current ?? 0;
-
-    let skillStep = 0;
-    if (skillItem) {
-      const rating = (skillItem.system?.basic?.rating || "").toLowerCase();
-      if (rating.includes("specialized")) skillStep = 2;
-      else if (rating.includes("trained")) skillStep = 1;
-      else if (rating.includes("inability")) skillStep = -1;
-    }
-
-    const finalDifficulty = Math.max(0, baseDifficulty - assets - effort - easedBy - skillStep + hinderedBy);
-    const target = finalDifficulty * 3;
-    const effortCost = effort > 0 ? Math.max(0, effort * 3 - edge) : 0;
-
-    const roll = await (new Roll('1d20')).evaluate();
-    const total = Number(roll.total ?? 0);
-    const modifier = (skillStep + assets + effort + easedBy - hinderedBy) * 3;
-    const achievedDifficulty = Math.max(0, Math.floor((total + modifier) / 3));
-    const success = total >= target;
-
-    let spent = 0;
-    if (effortCost > 0 && poolValue >= effortCost) {
-      await actor.update({ [`system.pools.${poolKey}.value`]: Math.max(0, poolValue - effortCost) });
-      spent = effortCost;
-    }
-
-    let specialText = "";
-    if (total === 1) specialText = "<div style='color:#8a6e3e;font-weight:700;'>GM Intrusion!</div>";
-    else if (total === 17) specialText = "<div style='color:#8a6e3e;'>+1 Damage</div>";
-    else if (total === 18) specialText = "<div style='color:#8a6e3e;'>+2 Damage</div>";
-    else if (total === 19) specialText = "<div style='color:#8a6e3e;font-weight:700;'>Minor Effect</div>";
-    else if (total === 20) specialText = "<div style='color:#8a6e3e;font-weight:700;'>Major Effect</div>";
-
-    const rollName = skillItem ? skillItem.name : poolName;
-    const flavor = `
-      <div style="padding:10px 14px;background:rgba(200,169,110,0.1);border:1px solid rgba(200,169,110,0.3);border-radius:8px;">
-        <div style="font-size:1.1em;font-weight:700;color:#8a6e3e;margin-bottom:6px;"><i class="fas fa-dice-d20"></i> ${rollName} — ${actor.name}</div>
-        <div style="color:#333;font-size:0.85em;margin-bottom:4px;">Base ${baseDifficulty} · Assets ${assets} · Effort ${effort} · Ease ${easedBy} · Hindrance ${hinderedBy}</div>
-        <div style="color:#333;font-size:0.85em;margin-bottom:4px;">Final ${finalDifficulty} · Target ${target} · Edge ${edge} · Cost ${effortCost}</div>
-        ${specialText}
-        <div style="font-size:1.2em;font-weight:700;color:${success ? '#2d8a3e' : '#c9302c'};margin-top:6px;">${success ? '✓ Success' : '✗ Failure'} — ${total} vs ${target}</div>
-        <div style="color:#555;font-size:0.85em;margin-top:4px;">Achieved Difficulty ${achievedDifficulty}</div>
-      </div>`;
-
-    await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor }, { rollMode: game.settings.get('core', 'rollMode') });
   }
 
   /* ─── Helpers ─── */
@@ -3030,10 +2945,15 @@ ${paths}  </svg>
     if (!actor) return;
     const name = actor?.name || "Character";
 
-    // Get armor
+    // Get armor — try multiple possible paths in Cypher System
     let armor = 0;
     try {
-      armor = Number(foundry.utils.getProperty(actor, "system.combat.armor")) || 0;
+      const raw = foundry.utils.getProperty(actor, "system.combat.armor")
+        ?? foundry.utils.getProperty(actor, "system.armor")
+        ?? foundry.utils.getProperty(actor, "system.pools.armor.value")
+        ?? foundry.utils.getProperty(actor, "system.stats.armor.value")
+        ?? 0;
+      armor = parseInt(raw) || 0;
     } catch {}
     // Get damage track
     let damageTrack = 0;
@@ -4554,6 +4474,11 @@ ${paths}  </svg>
       <div class="cgm-settings-grid">
         <div class="cgm-setting-section-title">SECTION 1</div>
         <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Position</span>
+          <input type="range" min="0" max="200" value="${this._sections[0].position ?? 0}" class="cgm-slider" data-action="setSectionPosition" data-section="0">
+          <span class="cgm-slider-val">${this._sections[0].position ?? 0}px</span>
+        </div>
+        <div class="cgm-setting-row">
           <span class="cgm-setting-label">Width</span>
           <input type="range" min="5" max="50" value="${this._sections[0].width}" class="cgm-slider" data-action="setSectionWidth" data-section="0">
           <span class="cgm-slider-val">${this._sections[0].width}%</span>
@@ -4569,11 +4494,37 @@ ${paths}  </svg>
           <input type="range" min="0" max="100" value="${this._sections[0].bgOpacity}" class="cgm-slider" data-action="setSectionOpacity" data-section="0">
           <span class="cgm-slider-val">${this._sections[0].bgOpacity}%</span>
         </div>
+
+        <div class="cgm-setting-section-title">SECTION 2</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Position on Taskbar</span>
+          <input type="range" min="0" max="200" value="${this._sections[1].position ?? 0}" class="cgm-slider" data-action="setSectionPosition" data-section="1">
+          <span class="cgm-slider-val">${this._sections[1].position ?? 0}px</span>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Width</span>
+          <input type="range" min="5" max="50" value="${this._sections[1].width}" class="cgm-slider" data-action="setSectionWidth" data-section="1">
+          <span class="cgm-slider-val">${this._sections[1].width}%</span>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Background Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionColor" data-section="1" value="${this._sections[1].bgColor}">
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Background Opacity</span>
+          <input type="range" min="0" max="100" value="${this._sections[1].bgOpacity}" class="cgm-slider" data-action="setSectionOpacity" data-section="1">
+          <span class="cgm-slider-val">${this._sections[1].bgOpacity}%</span>
+        </div>
       </div>
     `;
 
     return `
-      <div class="cgm-panel-header"><i class="fas fa-cog"></i> Settings</div>
+      <div class="cgm-panel-header">
+        <span><i class="fas fa-cog"></i> Settings</span>
+        <button class="cgm-panel-close" data-action="closeSettings" title="Close settings"><i class="fas fa-times"></i></button>
+      </div>
       <div class="cgm-settings-tabs">
         <button class="cgm-tab-btn ${generalTab ? 'cgm-tab-active' : ''}" data-action="switchTab" data-tab="general">General</button>
         <button class="cgm-tab-btn ${portraitTab ? 'cgm-tab-active' : ''}" data-action="switchTab" data-tab="portrait">Portrait</button>
@@ -4597,6 +4548,34 @@ ${paths}  </svg>
         const panel = e.currentTarget.dataset.panel;
         if (this.activePanel === panel) { this._closePanel(); }
         else { this._openPanel(panel); }
+      });
+    });
+
+    // Eye menu: toggle visibility
+    const eyeBtn = this.element.querySelector('[data-action="toggleActorVisibility"]');
+    const eyeMenu = this.element.querySelector('.cgm-eye-menu');
+    if (eyeBtn && eyeMenu) {
+      eyeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        eyeMenu.classList.toggle('cgm-eye-menu-visible');
+      });
+      // Close menu when clicking outside
+      document.addEventListener("click", (e) => {
+        if (!eyeMenu.contains(e.target) && e.target !== eyeBtn && !eyeBtn.contains(e.target)) {
+          eyeMenu.classList.remove('cgm-eye-menu-visible');
+        }
+      });
+    }
+    // Eye menu items
+    this.element.querySelectorAll('[data-action="setActorVisibility"]').forEach(item => {
+      item.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const mode = e.currentTarget.dataset.mode;
+        this._portraitVisibilityMode = mode;
+        await this._ss("portraitVisibilityMode", mode);
+        // Close menu and re-render to update portraits
+        eyeMenu?.classList.remove('cgm-eye-menu-visible');
+        this.render();
       });
     });
 
@@ -4651,17 +4630,50 @@ ${paths}  </svg>
       });
     }
 
-    // Name Generator button in SECTION 1
-    this.element.querySelector('[data-action="openNameGenerator"]')?.addEventListener("click", () => {
-      if (window.CypherNameGenerator) window.CypherNameGenerator.open();
-      else if (window.NameGenerator) window.NameGenerator.open();
-      else ui.notifications.warn("Name Generator module is not active.");
-    });
     // Lock toggle
     this.element.querySelector('[data-action="toggleLock"]')?.addEventListener("click", async () => {
       this._locked = !this._locked;
       await this._ss("locked", this._locked);
+      if (this._locked) {
+        document.getElementById("ginzzzu-portrait-layer")?.classList.remove("cgm-portraits-hidden");
+      }
       this.render();
+    });
+
+    // Scene Control button
+    this.element.querySelector('[data-action="openSceneControl"]')?.addEventListener("click", () => {
+      if (!window.cypherSceneControl) {
+        window.cypherSceneControl = new SceneControl();
+      }
+      window.cypherSceneControl.toggle();
+    });
+
+    // NPC Canvas button
+    this.element.querySelector('[data-action="openNPCCanvas"]')?.addEventListener("click", () => {
+      if (!window.cypherNPCCanvas) {
+        window.cypherNPCCanvas = new NPCCanvas();
+      }
+      window.cypherNPCCanvas.toggle();
+    });
+
+    // Quick Scene button
+    this.element.querySelector('[data-action="openQuickScene"]')?.addEventListener("click", () => {
+      if (!window.cypherQuickScene) {
+        window.cypherQuickScene = new QuickSceneGenerator();
+      }
+      window.cypherQuickScene.toggle();
+    });
+
+    // Cypher Log button
+    this.element.querySelector('[data-action="openCypherLog"]')?.addEventListener("click", () => {
+      const cypherLog = game.modules?.get("cypher-log")?.api?.CypherLog;
+      if (cypherLog) {
+        cypherLog.toggleLibrary();
+      } else if (window.CypherLog) {
+        window.CypherLog.toggleLibrary();
+      } else {
+        ui.notifications.warn("Cypher Log module is not active.");
+      }
     });
   }
 
@@ -4741,37 +4753,65 @@ ${paths}  </svg>
           if (vd) vd.textContent = `${this._opacity}%`;
         });
         // Section settings — width, color, opacity (update live, no re-render)
-        const _updateSectionStyle = () => {
-          const sec = this._sections[0];
+        const _updateSectionStyle = (idx = 0) => {
+          const sec = this._sections[idx];
           const rgb = this._hexToRgb(sec.bgColor);
           const bg = rgb ? `rgba(${rgb.r},${rgb.g},${rgb.b},${sec.bgOpacity/100})` : `rgba(255,255,255,${sec.bgOpacity/100})`;
-          const sectionEl = this.element?.querySelector('.cgm-custom-section');
+          const sectionEls = this.element?.querySelectorAll('.cgm-custom-section');
+          const sectionEl = sectionEls?.[idx];
           if (sectionEl) {
             sectionEl.style.width = `${sec.width}%`;
             sectionEl.style.background = bg;
           }
         };
-        el.querySelector('[data-action="setSectionWidth"]')?.addEventListener("input", async (e) => {
-          const idx = parseInt(e.target.dataset.section);
-          this._sections[idx].width = parseInt(e.target.value);
-          await this._ss("sectionWidth", this._sections[idx].width);
-          const vd = e.target.nextElementSibling;
-          if (vd) vd.textContent = `${this._sections[idx].width}%`;
-          _updateSectionStyle();
+        el.querySelectorAll('[data-action="setSectionWidth"]').forEach(input => {
+          input.addEventListener("input", async (e) => {
+            const idx = parseInt(e.target.dataset.section);
+            this._sections[idx].width = parseInt(e.target.value);
+            const key = idx === 0 ? "sectionWidth" : "section2Width";
+            await this._ss(key, this._sections[idx].width);
+            const vd = e.target.nextElementSibling;
+            if (vd) vd.textContent = `${this._sections[idx].width}%`;
+            _updateSectionStyle(idx);
+          });
         });
-        el.querySelector('[data-action="setSectionColor"]')?.addEventListener("input", async (e) => {
-          const idx = parseInt(e.target.dataset.section);
-          this._sections[idx].bgColor = e.target.value;
-          await this._ss("sectionBgColor", this._sections[idx].bgColor);
-          _updateSectionStyle();
+        el.querySelectorAll('[data-action="setSectionColor"]').forEach(input => {
+          input.addEventListener("input", async (e) => {
+            const idx = parseInt(e.target.dataset.section);
+            this._sections[idx].bgColor = e.target.value;
+            const key = idx === 0 ? "sectionBgColor" : "section2BgColor";
+            await this._ss(key, this._sections[idx].bgColor);
+            _updateSectionStyle(idx);
+          });
         });
-        el.querySelector('[data-action="setSectionOpacity"]')?.addEventListener("input", async (e) => {
-          const idx = parseInt(e.target.dataset.section);
-          this._sections[idx].bgOpacity = parseInt(e.target.value);
-          await this._ss("sectionBgOpacity", this._sections[idx].bgOpacity);
-          const vd = e.target.nextElementSibling;
-          if (vd) vd.textContent = `${this._sections[idx].bgOpacity}%`;
-          _updateSectionStyle();
+        el.querySelectorAll('[data-action="setSectionOpacity"]').forEach(input => {
+          input.addEventListener("input", async (e) => {
+            const idx = parseInt(e.target.dataset.section);
+            this._sections[idx].bgOpacity = parseInt(e.target.value);
+            const key = idx === 0 ? "sectionBgOpacity" : "section2BgOpacity";
+            await this._ss(key, this._sections[idx].bgOpacity);
+            const vd = e.target.nextElementSibling;
+            if (vd) vd.textContent = `${this._sections[idx].bgOpacity}%`;
+            _updateSectionStyle(idx);
+          });
+        });
+        // Section position — update live without re-render
+        el.querySelectorAll('[data-action="setSectionPosition"]').forEach(input => {
+          input.addEventListener("input", async (e) => {
+            const idx = parseInt(e.target.dataset.section);
+            const val = parseInt(e.target.value);
+            this._sections[idx].position = val;
+            const key = idx === 0 ? "sectionPosition" : "section2Position";
+            await this._ss(key, val);
+            const vd = e.target.nextElementSibling;
+            if (vd) vd.textContent = `${val}px`;
+            // Update section margin-left live
+            const sectionEls = this.element?.querySelectorAll('.cgm-custom-section');
+            const sec = sectionEls?.[idx];
+            if (sec) {
+              sec.style.marginLeft = val > 0 ? `${val}px` : '';
+            }
+          });
         });
         // Compact — update live
         el.querySelector('[data-action="toggleCompact"]')?.addEventListener("click", async () => {
@@ -4784,6 +4824,10 @@ ${paths}  </svg>
         // Tab switching
         el.querySelectorAll('[data-action="switchTab"]').forEach(btn => {
           btn.addEventListener("click", () => { this._settingsTab = btn.dataset.tab; this._openPanel("settings"); });
+        });
+        // Close settings
+        el.querySelector('[data-action="closeSettings"]')?.addEventListener("click", () => {
+          this._closePanel();
         });
         // Position — update live without re-render
         el.querySelectorAll('[data-action="setPortraitPosition"]').forEach(btn => {
@@ -5091,10 +5135,18 @@ ${paths}  </svg>
     // Bar starts hidden in autohide mode
     this._isHidden = true;
 
+    const portraitLayer = document.getElementById("ginzzzu-portrait-layer");
+    if (portraitLayer) portraitLayer.classList.add("cgm-portraits-hidden");
+
     const show = () => {
       if (this._isHidden) { this.element.classList.add("cgm-visible"); this._isHidden = false; }
       clearTimeout(this._autoHideTimer);
-      this._autoHideTimer = setTimeout(() => { this.element.classList.remove("cgm-visible"); this._isHidden = true; }, 3000);
+      if (portraitLayer) portraitLayer.classList.remove("cgm-portraits-hidden");
+      this._autoHideTimer = setTimeout(() => {
+        this.element.classList.remove("cgm-visible");
+        this._isHidden = true;
+        if (portraitLayer) portraitLayer.classList.add("cgm-portraits-hidden");
+      }, 3000);
     };
 
     this.element.addEventListener("mouseenter", show);
@@ -5110,6 +5162,141 @@ ${paths}  </svg>
     if (this._connInterval) clearInterval(this._connInterval);
     this._updateConnectionIndicator();
     this._connInterval = setInterval(() => this._updateConnectionIndicator(), 5000);
+  }
+
+  /* ─── Player Connection Monitor ─── */
+  _startPlayerMonitor() {
+    if (this._playerMonitorInterval) clearInterval(this._playerMonitorInterval);
+    this._previousActiveUsers = new Set(
+      game.users?.filter(u => u.active && !u.isGM).map(u => u.id) || []
+    );
+    this._playerMonitorInterval = setInterval(() => {
+      if (!game.users) return;
+      const currentlyActive = new Set(
+        game.users.filter(u => u.active && !u.isGM).map(u => u.id)
+      );
+
+      // DISCONNECTIONS: players who were active but are now inactive
+      if (this._previousActiveUsers) {
+        for (const userId of this._previousActiveUsers) {
+          if (!currentlyActive.has(userId)) {
+            const user = game.users.get(userId);
+            if (user) {
+              const ownedActors = [];
+              if (user.character?.id) ownedActors.push(user.character.id);
+              game.actors?.forEach(actor => {
+                if (actor.hasPlayerOwner && actor.testUserPermission(user, "OWNER")) {
+                  ownedActors.push(actor.id);
+                }
+              });
+              ownedActors.forEach(actorId => {
+                this._disconnectedActors.add(actorId);
+                this._startDisconnectionSound(actorId);
+              });
+              if (ownedActors.length) this.render();
+            }
+          }
+        }
+      }
+
+      // RECONNECTIONS: players who were inactive but are now active
+      for (const userId of currentlyActive) {
+        if (this._previousActiveUsers && !this._previousActiveUsers.has(userId)) {
+          const user = game.users.get(userId);
+          if (user) {
+            const ownedActors = [];
+            if (user.character?.id) ownedActors.push(user.character.id);
+            game.actors?.forEach(actor => {
+              if (actor.hasPlayerOwner && actor.testUserPermission(user, "OWNER")) {
+                ownedActors.push(actor.id);
+              }
+            });
+            ownedActors.forEach(actorId => {
+              this._disconnectedActors.delete(actorId);
+              this._stopDisconnectionSound(actorId);
+            });
+            if (ownedActors.length) this.render();
+          }
+        }
+      }
+
+      this._previousActiveUsers = currentlyActive;
+    }, 3000);
+  }
+
+  /* ─── Start disconnection sound for an actor ─── */
+  _startDisconnectionSound(actorId) {
+    const soundPath = (() => { try { return game.settings.get(MODULE_ID, "disconnectionSound"); } catch { return ""; } })();
+    if (!soundPath) return;
+    // Don't start duplicate sound for same actor
+    if (this._disconnectionSounds.has(actorId)) return;
+
+    const volume = (() => { try { return game.settings.get(MODULE_ID, "disconnectionSoundVolume"); } catch { return 50; } })();
+    const target = (() => { try { return game.settings.get(MODULE_ID, "disconnectionSoundTarget"); } catch { return "gm"; } })();
+    const vol = Math.max(0, Math.min(100, volume)) / 100;
+
+    let soundInstance = null;
+
+    if (target === "gm") {
+      soundInstance = this._doPlaySound(soundPath, vol, true); // loop = true
+    } else if (target === "all") {
+      soundInstance = this._doPlaySound(soundPath, vol, true);
+      game.socket.emit("module.cypher-gm-taskbar", {
+        action: "playSound",
+        soundPath,
+        volume: vol,
+        loop: true
+      });
+    } else if (target === "disconnected") {
+      // Find the user who owns this actor
+      const actor = game.actors.get(actorId);
+      if (actor) {
+        const owner = game.users.find(u => !u.isGM && actor.testUserPermission(u, "OWNER"));
+        if (owner) {
+          game.socket.emit("module.cypher-gm-taskbar", {
+            action: "playSound",
+            userId: owner.id,
+            soundPath,
+            volume: vol,
+            loop: true
+          });
+        }
+      }
+    }
+
+    this._disconnectionSounds.set(actorId, soundInstance);
+  }
+
+  /* ─── Stop disconnection sound for an actor ─── */
+  _stopDisconnectionSound(actorId) {
+    const soundInstance = this._disconnectionSounds.get(actorId);
+    if (soundInstance) {
+      try { soundInstance.stop(); } catch {}
+      this._disconnectionSounds.delete(actorId);
+    }
+  }
+
+  /* ─── Stop ALL disconnection sounds ─── */
+  _stopAllDisconnectionSounds() {
+    for (const [actorId, soundInstance] of this._disconnectionSounds) {
+      try { soundInstance?.stop(); } catch {}
+    }
+    this._disconnectionSounds.clear();
+  }
+
+  _doPlaySound(path, volume, loop) {
+    if (!path || !game.audio) return null;
+    try {
+      const src = game.audio.create({ src: path, volume, loop });
+      if (src) {
+        src.play();
+        console.log(`[CypherGMTaskbar] Playing sound: ${path} (vol: ${volume}, loop: ${loop})`);
+        return src;
+      }
+    } catch (err) {
+      console.warn("[CypherGMTaskbar] Failed to play sound:", err);
+    }
+    return null;
   }
 
   _updateConnectionIndicator() {
@@ -5142,7 +5329,7 @@ ${paths}  </svg>
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   SETTINGS
+   SETTINGS REGISTRATION
    ═══════════════════════════════════════════════════════════════ */
 
 function registerSettings() {
@@ -5175,6 +5362,20 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "sectionWidth", { name: "Section Width", hint: "Width of SECTION 1 as a percentage.", scope: "client", config: false, type: Number, default: 10 });
   game.settings.register(MODULE_ID, "sectionBgColor", { name: "Section Background Color", hint: "Background color of SECTION 1.", scope: "client", config: false, type: String, default: "#ffffff" });
   game.settings.register(MODULE_ID, "sectionBgOpacity", { name: "Section Background Opacity", hint: "Background opacity of SECTION 1 (0-100).", scope: "client", config: false, type: Number, default: 30 });
+  game.settings.register(MODULE_ID, "sectionPosition", { name: "Section Position", hint: "Horizontal offset of SECTION 1 in pixels (0-200).", scope: "client", config: false, type: Number, default: 0 });
+  // SECTION 2 settings
+  game.settings.register(MODULE_ID, "section2Width", { name: "Section 2 Width", hint: "Width of SECTION 2 as a percentage.", scope: "client", config: false, type: Number, default: 10 });
+  game.settings.register(MODULE_ID, "section2BgColor", { name: "Section 2 Background Color", hint: "Background color of SECTION 2.", scope: "client", config: false, type: String, default: "#ffffff" });
+  game.settings.register(MODULE_ID, "section2BgOpacity", { name: "Section 2 Background Opacity", hint: "Background opacity of SECTION 2 (0-100).", scope: "client", config: false, type: Number, default: 30 });
+  game.settings.register(MODULE_ID, "section2Position", { name: "Section 2 Position", hint: "Horizontal offset of SECTION 2 in pixels (0-200).", scope: "client", config: false, type: Number, default: 0 });
+  game.settings.register(MODULE_ID, "portraitVisibilityMode", { name: "Portrait Visibility Mode", hint: "Filter which player actor portraits are shown above the taskbar.", scope: "client", config: false, type: String, default: "all", choices: { all: "All", active: "Active Only", hide: "Hide All" } });
+  // Disconnection sound settings
+  game.settings.register(MODULE_ID, "disconnectionSound", { name: "Disconnection Sound", hint: "Sound file to play when a player disconnects. Leave empty for no sound.", scope: "world", config: true, type: String, default: "" });
+  game.settings.register(MODULE_ID, "disconnectionSoundLoop", { name: "Loop Sound", hint: "Loop the disconnection sound until stopped.", scope: "world", config: true, type: Boolean, default: false });
+  game.settings.register(MODULE_ID, "disconnectionSoundDuration", { name: "Sound Duration", hint: "How long to play the sound in seconds (if not looping).", scope: "world", config: true, type: Number, default: 5, range: { min: 1, max: 30, step: 1 } });
+  game.settings.register(MODULE_ID, "disconnectionSoundVolume", { name: "Sound Volume", hint: "Volume of the disconnection sound (0-100).", scope: "world", config: true, type: Number, default: 50, range: { min: 0, max: 100, step: 5 } });
+  game.settings.register(MODULE_ID, "disconnectionSoundTarget", { name: "Sound Target", hint: "Who should hear the disconnection sound.", scope: "world", config: true, type: String, default: "gm", choices: { gm: "GM Only", all: "All Players", disconnected: "Disconnected Player Only" } });
+  game.settings.register(MODULE_ID, "npcCanvasData", { name: "NPC Canvas Data", hint: "Stores NPC canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -5186,31 +5387,451 @@ Hooks.once("init", () => {
   registerSettings();
 });
 
-function buildTaskbarAPI(taskbarInstance) {
-  return {
-    version: '3.19.0',
-    registerTool(tool) { return taskbarInstance._toolRegistry.register(tool); },
-    unregisterTool(toolId) { return taskbarInstance._toolRegistry.unregister(toolId); },
-    getTool(toolId) { return taskbarInstance._toolRegistry.get(toolId); },
-    listTools() { return taskbarInstance._toolRegistry.list(); },
-    openTool(toolId, options = {}) {
-      const tool = taskbarInstance._toolRegistry.get(toolId);
-      if (!tool) throw new Error(`${MODULE_ID} | Tool '${toolId}' not found.`);
-      return tool.onClick({ event: null, tool, api: game[MODULE_ID], taskbar: taskbarInstance, options });
-    },
-    addToolbarButton(tool) { return taskbarInstance._toolRegistry.register(tool); },
-    render() { return taskbarInstance.render(); },
-    instance: taskbarInstance
-  };
-}
-
 Hooks.once("ready", () => {
-  if (!game.user?.isGM) { console.log(`${MODULE_ID} | User is not GM — taskbar skipped`); return; }
+  if (!game.user?.isGM) { console.log(`${MODULE_ID} | v3.17.39 | User is not GM — taskbar skipped`); return; }
   const disabled = (() => { try { return game.settings.get(MODULE_ID, "disableGMTaskbar"); } catch { return false; } })();
   if (disabled) { console.log(`${MODULE_ID} | GM Taskbar disabled in settings`); return; }
   setTimeout(() => { window.cypherGMTaskbar = new GMTaskbar(); window.cypherGMTaskbar.render(); console.log(`${MODULE_ID} | GM taskbar rendered`); }, 500);
 });
 
+/* File picker button for disconnection sound setting */
+Hooks.on("renderSettingsConfig", (app, html, data) => {
+  // Support both jQuery (html[0]) and DOM element
+  const root = html instanceof HTMLElement ? html : html[0];
+  if (!root) return;
+
+  // Find the sound input — V13 may use different nesting
+  const soundInput = root.querySelector(`input[name="${MODULE_ID}.disconnectionSound"]`) ||
+                     root.querySelector(`input[name^="${MODULE_ID}"][name*="disconnectionSound"]`) ||
+                     root.querySelector(`[data-setting-id="${MODULE_ID}.disconnectionSound"] input`);
+  if (!soundInput) {
+    console.log(`[CypherGMTaskbar] renderSettingsConfig: disconnectionSound input not found`);
+    return;
+  }
+
+  // Don't add button twice
+  if (soundInput.parentElement?.querySelector(".cgm-sound-picker-btn")) return;
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cgm-sound-picker-btn";
+  btn.title = "Browse for audio file";
+  btn.innerHTML = '<i class="fas fa-music"></i>';
+  btn.style.cssText = "margin-left:6px;flex-shrink:0;width:28px;height:28px;";
+
+  // Wrap input in flex container if needed
+  let container = soundInput.parentElement;
+  if (container && !container.classList.contains("flexrow")) {
+    const flexWrap = document.createElement("div");
+    flexWrap.className = "flexrow";
+    flexWrap.style.cssText = "align-items:center;";
+    container.insertBefore(flexWrap, soundInput);
+    flexWrap.appendChild(soundInput);
+    container = flexWrap;
+  }
+  container?.appendChild(btn);
+
+  btn.addEventListener("click", () => {
+    try {
+      // Foundry V13+ compatibility: use foundry.applications.apps.FilePicker if available
+      const PickerClass = foundry?.applications?.apps?.FilePicker || FilePicker;
+      const fp = new PickerClass({
+        type: "audio",
+        current: soundInput.value,
+        callback: path => {
+          soundInput.value = path;
+          soundInput.dispatchEvent(new Event("change", { bubbles: true }));
+          soundInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      });
+      fp.render(true);
+    } catch (err) {
+      console.error("[CypherGMTaskbar] FilePicker failed:", err);
+      ui.notifications.error("Could not open file picker. See console.");
+    }
+  });
+});
+
+/* GM-side socket test helper */
+window._testGMCallRollSocket = function(userId, actorId, poolName = "Might") {
+  console.log(`[CypherGMTaskbar] TEST EMIT to user ${userId}...`);
+  console.log("[CypherGMTaskbar] game.socket exists?", !!game.socket);
+  console.log("[CypherGMTaskbar] game.socket.emit exists?", typeof game.socket?.emit);
+  
+  const payload = {
+    action: "callForRollPool",
+    userId: userId,
+    actorId: actorId,
+    actorUuid: game.actors.get(actorId)?.uuid,
+    poolName: poolName,
+    difficulty: 3,
+    _testTimestamp: Date.now()
+  };
+  console.log("[CypherGMTaskbar] Payload:", payload);
+  
+  try {
+    game.socket.emit("module.cypher-gm-taskbar", payload);
+    console.log("[CypherGMTaskbar] TEST EMIT succeeded — payload sent");
+    ui.notifications.info(`Test roll request sent to player. Check their console (F12).`);
+  } catch (err) {
+    console.error("[CypherGMTaskbar] TEST EMIT FAILED:", err);
+    ui.notifications.error(`Socket emit failed: ${err.message}`);
+  }
+};
+
+/* Raw socket ping test — use this if above doesn't work */
+window._testRawSocket = function(targetUserId) {
+  console.log("[CypherGMTaskbar] Raw socket ping test...");
+  const testId = Math.random().toString(36).slice(2);
+  
+  // Set up a one-time listener for the response
+  const handler = (data) => {
+    if (data?._pingTest === testId) {
+      console.log("[CypherGMTaskbar] PONG received! Round-trip works:", data);
+      game.socket.off("module.cypher-gm-taskbar", handler);
+      ui.notifications.info("Socket round-trip test PASSED!");
+    }
+  };
+  game.socket.on("module.cypher-gm-taskbar", handler);
+  
+  // Send ping
+  game.socket.emit("module.cypher-gm-taskbar", {
+    _pingTest: testId,
+    userId: targetUserId,
+    fromGM: true,
+    timestamp: Date.now()
+  });
+  console.log("[CypherGMTaskbar] PING sent, id:", testId);
+  
+  // Auto-cleanup after 10s
+  setTimeout(() => {
+    game.socket.off("module.cypher-gm-taskbar", handler);
+    console.log("[CypherGMTaskbar] Ping test timed out (no response)");
+  }, 10000);
+};
+
+/* Socket listener for players to receive GM roll requests */
+Hooks.on("ready", () => {
+  if (game.user?.isGM) return;
+
+  /* Helper: try Cypher Taskbar with retry + error handling */
+  async function _tryCypherTaskbarAttr(actor, poolName, difficulty, maxAttempts = 8) {
+    for (let i = 0; i < maxAttempts; i++) {
+      const ctb = window.CypherTaskbar?.instance;
+      if (ctb && typeof ctb._openNativeAttributeRollDialog === "function") {
+        try {
+          await ctb._openNativeAttributeRollDialog(actor, poolName, { presetDifficulty: difficulty });
+          return { ok: true };
+        } catch (err) {
+          console.warn("[CypherGMTaskbar] _openNativeAttributeRollDialog threw:", err);
+          return { ok: false, error: err.message };
+        }
+      }
+      if (i < maxAttempts - 1) await new Promise(r => setTimeout(r, 400));
+    }
+    return { ok: false, error: "Cypher Taskbar not available after retries" };
+  }
+  async function _tryCypherTaskbarSkill(actor, skill, difficulty, maxAttempts = 8) {
+    for (let i = 0; i < maxAttempts; i++) {
+      const ctb = window.CypherTaskbar?.instance;
+      if (ctb && typeof ctb._openNativeSkillRollDialog === "function") {
+        try {
+          await ctb._openNativeSkillRollDialog(actor, skill, difficulty);
+          return { ok: true };
+        } catch (err) {
+          console.warn("[CypherGMTaskbar] _openNativeSkillRollDialog threw:", err);
+          return { ok: false, error: err.message };
+        }
+      }
+      if (i < maxAttempts - 1) await new Promise(r => setTimeout(r, 400));
+    }
+    return { ok: false, error: "Cypher Taskbar not available after retries" };
+  }
+
+  /* Global debug helper */
+  window._testCypherTaskbarRoll = async function(actorId, poolName = "Might", difficulty = 3) {
+    const actor = game.actors.get(actorId);
+    if (!actor) { console.error("Actor not found:", actorId); return; }
+    console.log("[CypherGMTaskbar] Testing direct call...");
+    const ctb = window.CypherTaskbar?.instance;
+    console.log("window.CypherTaskbar?", !!window.CypherTaskbar);
+    console.log("window.CypherTaskbar.instance?", !!ctb);
+    console.log("_openNativeAttributeRollDialog?", typeof ctb?._openNativeAttributeRollDialog);
+    const result = await _tryCypherTaskbarAttr(actor, poolName, difficulty, 3);
+    console.log("Result:", result);
+  };
+
+  game.socket.on("module.cypher-gm-taskbar", async (data) => {
+    // Respond to ping tests immediately (before userId check)
+    if (data?._pingTest) {
+      console.log("[CypherGMTaskbar] PING received! Sending PONG...", data);
+      game.socket.emit("module.cypher-gm-taskbar", {
+        _pingTest: data._pingTest,
+        _pong: true,
+        userId: game.users.find(u => u.isGM && u.active)?.id, // send back to GM
+        fromPlayer: game.user?.id,
+        timestamp: Date.now()
+      });
+      return;
+    }
+
+    console.log("[CypherGMTaskbar] SOCKET EVENT (raw):", data, "| my userId:", game.user?.id);
+    if (data.userId !== game.user?.id) {
+      console.log("[CypherGMTaskbar] SKIPPED — wrong userId. Expected:", data.userId, "Got:", game.user?.id);
+      return;
+    }
+
+    console.log("[CypherGMTaskbar] CALL ROLL received:", data);
+
+    const actor = data.actorUuid ? fromUuidSync(data.actorUuid) : game.actors.get(data.actorId);
+    if (!actor) {
+      console.warn("[CypherGMTaskbar] CALL ROLL: Actor not found", data);
+      ui.notifications.warn("Roll request received but actor not found.");
+      return;
+    }
+    console.log("[CypherGMTaskbar] Actor resolved:", actor.name, actor.uuid);
+
+    /* ─── Pool Roll ─── */
+    if (data.action === "callForRollPool") {
+      console.log(`[CypherGMTaskbar] Processing callForRollPool for ${actor.name}, pool: ${data.poolName}`);
+      ui.notifications.info(`GM calls for a ${data.poolName} roll!`);
+
+      // Try Cypher Taskbar native dialog with retry
+      const result = await _tryCypherTaskbarAttr(actor, data.poolName, data.difficulty);
+      if (result.ok) {
+        console.log("[CypherGMTaskbar] Cypher Taskbar attribute roll dialog opened");
+        return;
+      }
+      console.warn("[CypherGMTaskbar] Direct call failed:", result.error);
+
+      // Fallback: emit socket event to Cypher Taskbar module
+      try {
+        game.socket.emit("module.cypher-taskbar", {
+          type: "openAttributeRollDialog",
+          actorId: actor.id,
+          poolName: data.poolName,
+          difficulty: data.difficulty
+        });
+        console.log("[CypherGMTaskbar] Emitted openAttributeRollDialog to Cypher Taskbar socket");
+        return;
+      } catch (err) {
+        console.warn("[CypherGMTaskbar] Socket emit failed:", err);
+      }
+
+      // Last resort: actor.roll()
+      if (typeof actor.roll === "function") {
+        try {
+          console.log("[CypherGMTaskbar] Calling actor.roll...");
+          await actor.roll(data.poolName.toLowerCase(), { difficulty: data.difficulty });
+          console.log("[CypherGMTaskbar] actor.roll succeeded");
+          return;
+        } catch (err) {
+          console.warn("[CypherGMTaskbar] actor.roll failed:", err);
+        }
+      }
+
+      console.error("[CypherGMTaskbar] All pool roll methods failed.");
+      ui.notifications.error(`Could not open roll dialog for ${data.poolName}. Check browser console (F12) for details.`);
+    }
+
+    /* ─── Skill Roll ─── */
+    else if (data.action === "callForRollSkill") {
+      const skill = data.skillUuid ? fromUuidSync(data.skillUuid) : actor.items.get(data.skillId);
+      if (!skill) {
+        ui.notifications.warn(`Skill not found on ${actor.name}.`);
+        console.warn("[CypherGMTaskbar] Skill not found:", data);
+        return;
+      }
+      ui.notifications.info(`GM calls for a ${skill.name} roll!`);
+
+      // Try Cypher Taskbar native dialog with retry
+      const result = await _tryCypherTaskbarSkill(actor, skill, data.difficulty);
+      if (result.ok) {
+        console.log("[CypherGMTaskbar] Cypher Taskbar skill roll dialog opened");
+        return;
+      }
+      console.warn("[CypherGMTaskbar] Direct call failed:", result.error);
+
+      // Fallback: emit socket event to Cypher Taskbar module
+      try {
+        game.socket.emit("module.cypher-taskbar", {
+          type: "openSkillRollDialog",
+          actorId: actor.id,
+          skillId: skill.id,
+          difficulty: data.difficulty
+        });
+        console.log("[CypherGMTaskbar] Emitted openSkillRollDialog to Cypher Taskbar socket");
+        return;
+      } catch (err) {
+        console.warn("[CypherGMTaskbar] Socket emit failed:", err);
+      }
+
+      console.error("[CypherGMTaskbar] All skill roll methods failed.");
+      ui.notifications.error(`Could not open roll dialog for ${skill.name}. Check browser console (F12) for details.`);
+    }
+
+    /* ─── Intrusion ─── */
+    else if (data.action === "requestIntrusion") {
+      console.log(`[CypherGMTaskbar] Intrusion request for ${actor.name}`);
+      ui.notifications.warn(`GM Intrusion on ${actor.name}!`, { permanent: true });
+
+      const img = actor?.img || "icons/svg/mystery-man.svg";
+      const name = actor?.name || "Character";
+
+      // Helper: get XP path (same as GM taskbar)
+      function _getXPPath(a) {
+        const sys = a.system ?? {};
+        if (sys.basic && "xp" in sys.basic) return "system.basic.xp";
+        if (sys.advancement && "xp" in sys.advancement) return "system.advancement.xp";
+        return null;
+      }
+      async function _modifyXP(a, delta) {
+        const xpPath = _getXPPath(a);
+        if (!xpPath) return false;
+        const current = Number(foundry.utils.getProperty(a, xpPath) ?? 0);
+        const newVal = Math.max(0, Math.min(10, current + delta));
+        if (newVal === current) {
+          ui.notifications.warn(`${a.name} XP cannot change (currently ${current}).`);
+          return false;
+        }
+        try {
+          await a.update({ [xpPath]: newVal });
+          const verb = delta > 0 ? "gained" : "lost";
+          ui.notifications.info(`${a.name} ${verb} ${Math.abs(delta)} XP (now ${newVal}).`);
+          return true;
+        } catch (err) {
+          console.warn("[CypherGMTaskbar] XP update failed:", err);
+          ui.notifications.error(`Could not update XP. GM will handle it.`);
+          return false;
+        }
+      }
+      function _sendIntrusionChat(a, accepted, gaveXPTo = null) {
+        const actorImg = a?.img || "icons/svg/mystery-man.svg";
+        const actorName = a?.name || "Unknown";
+        const acceptedColor = accepted ? "#40b060" : "#ff7070";
+        const acceptedIcon = accepted ? "fa-check-circle" : "fa-times-circle";
+        const acceptedText = accepted ? "ACCEPTED" : "REFUSED";
+        const xpResult = accepted
+          ? `<div style="margin-top:6px; color:#c8a96e; font-size:12px;"><i class="fas fa-plus-circle" style="margin-right:4px;"></i> +1 XP (accepted intrusion)</div>`
+          : `<div style="margin-top:6px; color:#ff7070; font-size:12px;"><i class="fas fa-minus-circle" style="margin-right:4px;"></i> -1 XP (refused intrusion)</div>`;
+        const giveXPResult = gaveXPTo
+          ? `<div style="margin-top:4px; color:#40b060; font-size:12px;"><i class="fas fa-gift" style="margin-right:4px;"></i> +1 XP given to <strong>${gaveXPTo.name}</strong></div>`
+          : "";
+        ChatMessage.create({
+          speaker: { actor: a.id, alias: actorName },
+          content: `
+            <div style="display:flex; align-items:flex-start; gap:10px; padding:4px 0;">
+              <img src="${actorImg}" style="width:36px; height:36px; border-radius:50%; border:2px solid ${acceptedColor}; object-fit:cover; flex-shrink:0; box-shadow:0 0 8px ${acceptedColor}40;">
+              <div style="flex:1;">
+                <div style="font-weight:700; font-size:14px; color:#e0e0e0; margin-bottom:2px;">${actorName} <span style="color:${acceptedColor}; font-size:12px; margin-left:6px;"><i class="fas ${acceptedIcon}" style="margin-right:3px;"></i>${acceptedText}</span></div>
+                <div style="font-size:12px; color:#aaa;">GM Intrusion</div>
+                ${xpResult}${giveXPResult}
+              </div>
+            </div>`
+        });
+      }
+
+      // Show intrusion dialog on player side
+      new Dialog({
+        title: ``,
+        content: `
+          <div class="cgm-intrusion-dialog">
+            <div class="cgm-intrusion-portrait-bg" style="background-image:url('${img}');"></div>
+            <div class="cgm-intrusion-header"><i class="fas fa-bolt" style="margin-right:6px;"></i>GM Intrusion</div>
+            <div class="cgm-intrusion-flavor">Let's make this interesting.</div>
+            <div class="cgm-intrusion-question">Do you accept GM's <strong>INTRUSION</strong>?</div>
+            <div class="cgm-intrusion-target"><i class="fas fa-crosshairs"></i> Target: <strong>${name}</strong></div>
+          </div>`,
+        classes: ["cgm-dark-dialog", "cgm-intrusion-window"],
+        buttons: {
+          no: {
+            icon: '<i class="fas fa-times" style="color:#ff7070;"></i>',
+            label: "NO",
+            callback: async () => {
+              await _modifyXP(actor, -1);
+              _sendIntrusionChat(actor, false);
+            }
+          },
+          yes: {
+            icon: '<i class="fas fa-check" style="color:#40b060;"></i>',
+            label: "YES",
+            callback: async () => {
+              const ok = await _modifyXP(actor, 1);
+              if (!ok) return; // Don't proceed if XP update failed
+
+              // Show "give XP to another" dialog
+              const pcs = game.actors.filter(other => other.type === "pc" && other.id !== actor.id && other.hasPlayerOwner);
+              const options = pcs.map(pc => `<option value="${pc.id}">${pc.name}</option>`).join("");
+
+              if (!pcs.length) {
+                _sendIntrusionChat(actor, true);
+                ui.notifications.info("No other PCs to give XP to.");
+                return;
+              }
+
+              new Dialog({
+                title: ``,
+                content: `
+                  <div class="cgm-give-xp-dialog">
+                    <div class="cgm-give-xp-source"><img src="${img}" alt="${name}"><div class="cgm-give-xp-source-name">${name}</div><div class="cgm-give-xp-source-label">shares the wealth</div></div>
+                    <div class="cgm-give-xp-flavor">So who is the lucky one<br>you will give XP to?</div>
+                    <div class="cgm-give-xp-select-wrap">
+                      <select id="cgm-give-xp-target" class="cgm-give-xp-select"><option value="" disabled selected>Select a character...</option>${options}</select>
+                    </div>
+                  </div>`,
+                classes: ["cgm-dark-dialog"],
+                buttons: {
+                  confirm: {
+                    icon: '<i class="fas fa-gift"></i>',
+                    label: "CONFIRM",
+                    callback: async (html) => {
+                      const el = html?.[0] ?? html;
+                      const select = el.querySelector ? el.querySelector("#cgm-give-xp-target") : html.find("#cgm-give-xp-target")[0];
+                      const targetId = select?.value;
+                      if (!targetId) { ui.notifications.warn("Please select a character."); return; }
+                      const targetActor = game.actors.get(targetId);
+                      if (targetActor) {
+                        await _modifyXP(targetActor, 1);
+                        _sendIntrusionChat(actor, true, targetActor);
+                      }
+                    }
+                  }
+                },
+                default: "confirm"
+              }).render(true);
+            }
+          }
+        },
+        default: "yes"
+      }).render(true);
+    }
+
+    /* ─── Play Sound (player-side) ─── */
+    else if (data.action === "playSound") {
+      console.log("[CypherGMTaskbar] PLAY SOUND received:", data);
+      if (!game.audio) {
+        console.warn("[CypherGMTaskbar] game.audio not available");
+        return;
+      }
+      try {
+        const src = game.audio.create({
+          src: data.soundPath,
+          volume: data.volume ?? 0.5,
+          loop: data.loop ?? false
+        });
+        if (src) {
+          src.play();
+          console.log(`[CypherGMTaskbar] Playing sound: ${data.soundPath}`);
+          if (!data.loop && (data.duration ?? 0) > 0) {
+            setTimeout(() => { try { src.stop(); } catch {} }, (data.duration) * 1000);
+          }
+        }
+      } catch (err) {
+        console.warn("[CypherGMTaskbar] Failed to play sound:", err);
+      }
+    }
+  });
+});
 /* Refresh portraits when actor data changes (pools, XP, damage track, etc.) */
 Hooks.on("updateActor", (actor, data, options, userId) => {
   if (!game.user?.isGM) return;
@@ -5299,35 +5920,975 @@ Hooks.on("renderRollEngineDialogSheet", (app, html, data) => {
   }
 });
 
+/* ═══════════════════════════════════════════════════════
+   QUICK SCENE GENERATOR — Integrated Module
+   ═══════════════════════════════════════════════════════ */
 
-GMTaskbar.prototype._buildRegisteredToolsHTML = function() {
-  const tools = this._toolRegistry?.visibleTools?.() || [];
-  if (!tools.length) return '';
-  return `
-    <div class="cgm-tools-box" aria-label="Registered Tools">
-      ${tools.map(tool => `
-        <button class="cgm-icon-btn cgm-registered-tool-btn" data-tool-id="${tool.id}" title="${tool.tooltip}">
-          <i class="fas ${tool.icon}"></i>
+class QuickSceneGenerator {
+  constructor() {
+    this._visible = false;
+    this._panelEl = null;
+    this._sceneType = "random";
+    this._scenePlace = "random";
+    this._sceneTone = "random";
+    this._sceneTime = "random";
+    this._sceneWeather = "random";
+    this._sceneScale = "random";
+    this._sceneDifficulty = "random";
+    this._sceneSensory = "random";
+    this._sceneDisposition = "random";
+    this._sceneStakes = "random";
+    this._sceneCombat = "random";
+    this._sceneTwist = "random";
+    this._lastScene = null;
+    this._dragging = false;
+    this._dragOffset = { x: 0, y: 0 };
+  }
+
+  /* ─── Public API ─── */
+
+  toggle() {
+    if (this._visible) { this.close(); }
+    else { this.open(); }
+  }
+
+  open() {
+    if (this._visible) return;
+    this._visible = true;
+    this._render();
+  }
+
+  close() {
+    if (!this._visible) return;
+    this._visible = false;
+    if (this._panelEl) {
+      this._panelEl.classList.remove("cgm-quickscene-visible");
+      setTimeout(() => {
+        this._panelEl?.remove();
+        this._panelEl = null;
+      }, 200);
+    }
+  }
+
+  /* ─── Rendering ─── */
+
+  _render() {
+    if (this._panelEl) { this._panelEl.remove(); }
+
+    const panel = document.createElement("div");
+    panel.className = "cgm-quickscene-panel";
+    panel.innerHTML = this._buildPanelHTML();
+    document.body.appendChild(panel);
+    this._panelEl = panel;
+
+    // Position above the Quick Scene button
+    this._positionAboveButton(panel);
+
+    requestAnimationFrame(() => {
+      panel.classList.add("cgm-quickscene-visible");
+    });
+
+    this._bindEvents(panel);
+  }
+
+  _positionAboveButton(panel) {
+    const btn = document.querySelector('.cgm-section-btn-quickscene');
+    if (!btn) return;
+
+    const btnRect = btn.getBoundingClientRect();
+    const panelHeight = panel.offsetHeight || 500; // fallback before measure
+    const margin = 10;
+    const viewportH = window.innerHeight;
+
+    // Try to position above the button
+    let top = btnRect.top - panelHeight - margin;
+
+    // If not enough room above, position below the button
+    if (top < margin) {
+      top = btnRect.bottom + margin;
+    }
+
+    // Clamp to viewport
+    if (top + panelHeight > viewportH - margin) {
+      top = viewportH - panelHeight - margin;
+    }
+    if (top < margin) {
+      top = margin;
+    }
+
+    panel.style.left = `${Math.max(margin, Math.min(btnRect.left, window.innerWidth - panel.offsetWidth - margin))}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = 'auto';
+  }
+
+  _buildPanelHTML() {
+    return `
+      <div class="cgm-quickscene-panel-header">
+        <span><i class="fas fa-dice-d20"></i> Quick Scene Generator</span>
+        <button class="cgm-quickscene-panel-close" data-action="closeQuickScene" title="Close">
+          <i class="fas fa-times"></i>
         </button>
-      `).join('')}
-    </div>
-  `;
-};
-GMTaskbar.prototype._bindRegisteredToolEvents = function() {
-  if (!this.element) return;
-  this.element.querySelectorAll('.cgm-registered-tool-btn[data-tool-id]').forEach(btn => {
-    btn.addEventListener('click', ev => {
-      ev.stopPropagation();
-      const toolId = btn.dataset.toolId;
-      const tool = this._toolRegistry?.get(toolId);
-      if (!tool) return;
-      try {
-        tool.onClick({ event: ev, tool, api: game[MODULE_ID], taskbar: this });
-        Hooks.callAll(`${MODULE_ID}.toolClicked`, tool, game[MODULE_ID]);
-      } catch (err) {
-        console.error(`${MODULE_ID} | Tool '${toolId}' click failed`, err);
-        ui.notifications?.error?.(`Taskbar tool '${tool.label}' failed.`);
+      </div>
+      <div class="cgm-quickscene-panel-body cgm-quickscene-two-col">
+        <div class="cgm-quickscene-left-col">
+          ${this._buildLeftColumnHTML()}
+        </div>
+        <div class="cgm-quickscene-right-col">
+          ${this._buildRightColumnHTML()}
+        </div>
+      </div>
+    `;
+  }
+
+  _buildLeftColumnHTML() {
+    const places = [
+      { value: "random", label: "🎲 Random" },
+      { value: "rural", label: "🌾 Rural" },
+      { value: "city", label: "🏙️ City" },
+      { value: "indoor", label: "🏠 Indoor" },
+      { value: "outdoor", label: "🌲 Outdoor" },
+      { value: "wilderness", label: "🏔️ Wilderness" },
+      { value: "underground", label: "⛏️ Underground" },
+      { value: "aquatic", label: "🌊 Aquatic" },
+      { value: "aerial", label: "☁️ Aerial" },
+      { value: "dungeon", label: "💀 Dungeon" },
+      { value: "ruins", label: "🏛️ Ruins" },
+      { value: "castle", label: "🏰 Castle" },
+      { value: "temple", label: "⛪ Temple" },
+      { value: "ship", label: "⚓ Ship" },
+      { value: "space", label: "🚀 Space" }
+    ];
+
+    const tones = [
+      { value: "random", label: "🎲 Random" },
+      { value: "epic", label: "⚔️ Epic" },
+      { value: "dark", label: "🌑 Dark" },
+      { value: "mysterious", label: "🔮 Mysterious" },
+      { value: "comedic", label: "😂 Comedic" },
+      { value: "grim", label: "💀 Grim" },
+      { value: "wonder", label: "✨ Wonder" },
+      { value: "tense", label: "🎭 Tense" }
+    ];
+
+    const times = [
+      { value: "random", label: "🎲 Random" },
+      { value: "dawn", label: "🌅 Dawn" },
+      { value: "day", label: "☀️ Day" },
+      { value: "dusk", label: "🌇 Dusk" },
+      { value: "night", label: "🌙 Night" },
+      { value: "midnight", label: "🕛 Midnight" }
+    ];
+
+    const weathers = [
+      { value: "random", label: "🎲 Random" },
+      { value: "clear", label: "🌤️ Clear" },
+      { value: "rain", label: "🌧️ Rain" },
+      { value: "storm", label: "⛈️ Storm" },
+      { value: "fog", label: "🌫️ Fog" },
+      { value: "snow", label: "❄️ Snow" },
+      { value: "heat", label: "🔥 Extreme Heat" },
+      { value: "cold", label: "🧊 Extreme Cold" }
+    ];
+
+    const scales = [
+      { value: "random", label: "🎲 Random" },
+      { value: "solo", label: "🧍 Solo" },
+      { value: "small", label: "👥 Small" },
+      { value: "standard", label: "🫂 Standard" },
+      { value: "large", label: "🏟️ Large" }
+    ];
+
+    const difficulties = [
+      { value: "random", label: "🎲 Random" },
+      { value: "trivial", label: "🟢 Trivial" },
+      { value: "easy", label: "🔵 Easy" },
+      { value: "medium", label: "🟡 Medium" },
+      { value: "hard", label: "🟠 Hard" },
+      { value: "extreme", label: "🔴 Extreme" }
+    ];
+
+    const sensories = [
+      { value: "random", label: "🎲 Random" },
+      { value: "visual", label: "👁️ Visual" },
+      { value: "sound", label: "👂 Sound" },
+      { value: "smell", label: "👃 Smell" },
+      { value: "touch", label: "🖐️ Touch" },
+      { value: "taste", label: "👅 Taste" }
+    ];
+
+    const dispositions = [
+      { value: "random", label: "🎲 Random" },
+      { value: "hostile", label: "⚔️ Hostile" },
+      { value: "wary", label: "👀 Wary" },
+      { value: "neutral", label: "😐 Neutral" },
+      { value: "friendly", label: "🤝 Friendly" }
+    ];
+
+    const stakesOptions = [
+      { value: "random", label: "🎲 Random" },
+      { value: "low", label: "🟢 Low" },
+      { value: "medium", label: "🟡 Medium" },
+      { value: "high", label: "🟠 High" },
+      { value: "existential", label: "🔴 Existential" }
+    ];
+
+    const combats = [
+      { value: "random", label: "🎲 Random" },
+      { value: "none", label: "🕊️ None" },
+      { value: "unlikely", label: "🟢 Unlikely" },
+      { value: "possible", label: "🟡 Possible" },
+      { value: "likely", label: "🟠 Likely" },
+      { value: "certain", label: "🔴 Certain" }
+    ];
+
+    const twists = [
+      { value: "random", label: "🎲 Random" },
+      { value: "betrayal", label: "🗡️ Betrayal" },
+      { value: "discovery", label: "🔍 Discovery" },
+      { value: "reversal", label: "🔄 Reversal" },
+      { value: "sacrifice", label: "💔 Sacrifice" },
+      { value: "alliance", label: "🤝 Alliance" },
+      { value: "trap", label: "⚠️ Trap" },
+      { value: "none", label: "❌ None" }
+    ];
+
+    const makeOptions = (arr, val) => arr.map(p =>
+      `<option value="${p.value}" ${val === p.value ? 'selected' : ''}>${p.label}</option>`
+    ).join('');
+
+    return `
+      <div class="cgm-quickscene-options-grid">
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-map-pin"></i> PLACE</label>
+          <select data-action="selectPlace">${makeOptions(places, this._scenePlace)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-theater-masks"></i> TONE</label>
+          <select data-action="selectTone">${makeOptions(tones, this._sceneTone)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-clock"></i> TIME</label>
+          <select data-action="selectTime">${makeOptions(times, this._sceneTime)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-cloud-sun"></i> WEATHER</label>
+          <select data-action="selectWeather">${makeOptions(weathers, this._sceneWeather)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-users"></i> SCALE</label>
+          <select data-action="selectScale">${makeOptions(scales, this._sceneScale)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-skull"></i> DIFFICULTY</label>
+          <select data-action="selectDifficulty">${makeOptions(difficulties, this._sceneDifficulty)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-eye"></i> SENSORY</label>
+          <select data-action="selectSensory">${makeOptions(sensories, this._sceneSensory)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-comment-dots"></i> DISPOSITION</label>
+          <select data-action="selectDisposition">${makeOptions(dispositions, this._sceneDisposition)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-fire-alt"></i> STAKES</label>
+          <select data-action="selectStakes">${makeOptions(stakesOptions, this._sceneStakes)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-shield-alt"></i> COMBAT</label>
+          <select data-action="selectCombat">${makeOptions(combats, this._sceneCombat)}</select>
+        </div>
+        <div class="cgm-quickscene-option">
+          <label><i class="fas fa-mask"></i> TWIST</label>
+          <select data-action="selectTwist">${makeOptions(twists, this._sceneTwist)}</select>
+        </div>
+      </div>
+      <div class="cgm-quickscene-types">
+        <button class="cgm-quickscene-type-btn ${this._sceneType === 'physical' ? 'cgm-qst-active' : ''}" data-type="physical">
+          <i class="fas fa-fist-raised"></i> Physical
+        </button>
+        <button class="cgm-quickscene-type-btn ${this._sceneType === 'social' ? 'cgm-qst-active' : ''}" data-type="social">
+          <i class="fas fa-comments"></i> Social
+        </button>
+        <button class="cgm-quickscene-type-btn ${this._sceneType === 'mental' ? 'cgm-qst-active' : ''}" data-type="mental">
+          <i class="fas fa-brain"></i> Mental
+        </button>
+        <button class="cgm-quickscene-type-btn ${this._sceneType === 'random' ? 'cgm-qst-active' : ''}" data-type="random">
+          <i class="fas fa-random"></i> Random
+        </button>
+      </div>
+      <button class="cgm-quickscene-generate" data-action="generateScene">
+        <i class="fas fa-dice"></i> Generate Scene
+      </button>
+    `;
+  }
+
+  _buildRightColumnHTML() {
+    if (!this._lastScene) {
+      return `
+        <div class="cgm-quickscene-placeholder">
+          <i class="fas fa-scroll"></i>
+          <p>Choose your scene parameters and click Generate!</p>
+        </div>
+      `;
+    }
+    return this._buildResultHTML(this._lastScene);
+  }
+
+  _buildPanelBodyHTML() { return ''; }
+
+  _buildResultHTML(scene) {
+    const typeColor = scene.type === 'physical' ? '#e07040' : scene.type === 'social' ? '#40a0e0' : '#a040d0';
+    const tagsHtml = (tags) => tags && tags.length ? `<span class="cgm-quickscene-tags">${tags.map(t => `<span class="cgm-tag" style="background:${typeColor}20;color:${typeColor};border:1px solid ${typeColor}40">${t}</span>`).join('')}</span>` : '';
+    return `
+      <div class="cgm-quickscene-result">
+        <div class="cgm-quickscene-result-header" style="border-left-color: ${typeColor}">
+          <i class="fas ${scene.typeIcon}"></i>
+          <span>${scene.type.toUpperCase()} SCENE</span>
+          <span class="cgm-quickscene-diff">Diff ${scene.difficultyValue} <small>(TN ${scene.difficultyValue * 3})</small></span>
+        </div>
+        <div class="cgm-quickscene-result-body">
+          ${scene.place && scene.place !== 'random' ? `
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-map-pin"></i> Place</span>
+            <span class="cgm-quickscene-value">${scene.place}</span>
+          </div>
+          ` : ""}
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-map-marker-alt"></i> Setting</span>
+            <span class="cgm-quickscene-value">${scene.setting.text}</span>
+            ${tagsHtml(scene.setting.tags)}
+          </div>
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-bullseye"></i> Objective</span>
+            <span class="cgm-quickscene-value">${scene.objective.text}</span>
+            ${tagsHtml(scene.objective.tags)}
+          </div>
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-exclamation-triangle"></i> Complication</span>
+            <span class="cgm-quickscene-value">${scene.complication.text}</span>
+            ${tagsHtml(scene.complication.tags)}
+          </div>
+          ${scene.npc ? `
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-user"></i> Key NPC</span>
+            <span class="cgm-quickscene-value">${scene.npc.text}</span>
+            ${tagsHtml(scene.npc.tags)}
+          </div>
+          ` : ""}
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-wind"></i> Atmosphere</span>
+            <span class="cgm-quickscene-value">${scene.atmosphere.text}</span>
+            ${tagsHtml(scene.atmosphere.tags)}
+          </div>
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-clock"></i> Time Pressure</span>
+            <span class="cgm-quickscene-value">${scene.timePressure.text}</span>
+            ${tagsHtml(scene.timePressure.tags)}
+          </div>
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-gift"></i> Potential Reward</span>
+            <span class="cgm-quickscene-value">${scene.reward.text}</span>
+            ${tagsHtml(scene.reward.tags)}
+          </div>
+          <div class="cgm-quickscene-field">
+            <span class="cgm-quickscene-label"><i class="fas fa-lightbulb"></i> GM Tip</span>
+            <span class="cgm-quickscene-value cgm-quickscene-tip">${scene.gmTip.text}</span>
+            ${tagsHtml(scene.gmTip.tags)}
+          </div>
+          ${scene.toneResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-theater-masks"></i> Tone Guidance</span>
+            <span class="cgm-quickscene-value">${scene.toneResult}</span>
+          </div>
+          ` : ""}
+          ${scene.timeResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-clock"></i> Time of Day</span>
+            <span class="cgm-quickscene-value">${scene.timeResult}</span>
+          </div>
+          ` : ""}
+          ${scene.weatherResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-cloud-sun"></i> Weather Effect</span>
+            <span class="cgm-quickscene-value">${scene.weatherResult}</span>
+          </div>
+          ` : ""}
+          ${scene.scaleResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-users"></i> Party Scale</span>
+            <span class="cgm-quickscene-value">${scene.scaleResult}</span>
+          </div>
+          ` : ""}
+          ${scene.sensoryResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-eye"></i> Sensory Focus</span>
+            <span class="cgm-quickscene-value">${scene.sensoryResult}</span>
+          </div>
+          ` : ""}
+          ${scene.dispositionResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-comment-dots"></i> NPC Disposition</span>
+            <span class="cgm-quickscene-value">${scene.dispositionResult}</span>
+          </div>
+          ` : ""}
+          ${scene.stakesResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-fire-alt"></i> Stakes</span>
+            <span class="cgm-quickscene-value">${scene.stakesResult}</span>
+          </div>
+          ` : ""}
+          ${scene.combatResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-shield-alt"></i> Combat Outlook</span>
+            <span class="cgm-quickscene-value">${scene.combatResult}</span>
+          </div>
+          ` : ""}
+          ${scene.twistResult ? `
+          <div class="cgm-quickscene-field cgm-quickscene-result-highlight">
+            <span class="cgm-quickscene-label"><i class="fas fa-mask"></i> Twist</span>
+            <span class="cgm-quickscene-value">${scene.twistResult}</span>
+          </div>
+          ` : ""}
+        </div>
+        <div class="cgm-quickscene-actions">
+          <button class="cgm-quickscene-action-btn" data-action="copyScene">
+            <i class="fas fa-copy"></i> Copy to Clipboard
+          </button>
+          <button class="cgm-quickscene-action-btn" data-action="regenerateScene">
+            <i class="fas fa-redo"></i> Reroll
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  /* ─── Scene Generation Tables ─── */
+
+  _generateScene(type) {
+    const roll = (arr) => {
+      const item = arr[Math.floor(Math.random() * arr.length)];
+      return typeof item === 'string' ? { text: item, tags: [] } : item;
+    };
+    const rollInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+    const physical = {
+      settings: [
+        { text: "A rope bridge rotting from the center outward, spanning a gorge where the river below has carved its own thunder", tags: ["Vertical", "Environmental", "Time-Sensitive", "Structural", "Outdoor"] },
+        { text: "A tunnel flooded to chest height, its walls lined with phosphorescent growth that dies when touched", tags: ["Aquatic", "Underground", "Environmental", "Fragile", "Light-Source"] },
+        { text: "A building consumed by fire, its floors collapsing in sequence from the weight of its own destruction", tags: ["Urban", "Fire", "Time-Sensitive", "Vertical", "Structural"] },
+        { text: "A cliff path no wider than a shoulder, carved by wind and rain into smooth stone that offers no grip", tags: ["Vertical", "Outdoor", "Environmental", "Narrow", "Exposed"] },
+        { text: "A desert where the sand has fused into glass shards that reflect the sun into blinding patterns", tags: ["Environmental", "Outdoor", "Light-Source", "Hazardous", "Extreme-Temperature"] },
+        { text: "A frozen lake with cracks radiating from a central point, as if something beneath is pushing upward", tags: ["Aquatic", "Environmental", "Frozen", "Time-Sensitive", "Suspense"] },
+        { text: "A maze of industrial pipes, some venting scalding steam without warning, their valves rusted shut", tags: ["Indoor", "Mechanical", "Environmental", "Hazardous", "Confined"] },
+        { text: "An elevator shaft stripped of its car, its cables swaying in a draft that carries voices from below", tags: ["Vertical", "Indoor", "Structural", "Atmospheric", "Descent"] },
+        { text: "A swamp where the water bubbles with pockets of gas that ignite at the smallest spark", tags: ["Aquatic", "Outdoor", "Environmental", "Hazardous", "Fire-Prone"] },
+        { text: "A mine shaft supported by timbers that groan under the weight of stone they were never meant to hold", tags: ["Underground", "Structural", "Environmental", "Time-Sensitive", "Confined"] }
+      ],
+      objectives: [
+        { text: "Cross before the remaining structure fails completely", tags: ["Time-Sensitive", "Traversal", "Environmental"] },
+        { text: "Recover an object visible on the far side that cannot be reached by any other means", tags: ["Retrieval", "Risk-Reward", "Precision"] },
+        { text: "Extract a companion who is trapped in a section that is becoming inaccessible", tags: ["Rescue", "Teamwork", "Time-Sensitive"] },
+        { text: "Outpace pursuers by taking a route they are unwilling or unable to follow", tags: ["Escape", "Pursuit", "Skill-Based"] },
+        { text: "Reach a vantage point that reveals what lies ahead before committing to the path", tags: ["Reconnaissance", "Vertical", "Strategic"] },
+        { text: "Navigate through without triggering the environmental hazards that surround the only viable route", tags: ["Stealth", "Environmental", "Precision"] },
+        { text: "Transport something fragile through conditions that threaten to destroy it at every moment", tags: ["Protection", "Environmental", "Tension"] },
+        { text: "Discover whether the visible danger is the real threat, or whether something else waits beyond it", tags: ["Investigation", "Suspense", "Risk-Assessment"] }
+      ],
+      complications: [
+        { text: "The environment is actively deteriorating, and the rate of deterioration is accelerating", tags: ["Time-Sensitive", "Escalating", "Environmental"] },
+        { text: "Something inhabits this place and regards the party as intruders in territory it has claimed", tags: ["Creature", "Territorial", "Hostile"] },
+        { text: "A member of the group is impaired, either by injury, exhaustion, or equipment failure", tags: ["Party-Impaired", "Teamwork", "Escalation"] },
+        { text: "The route that was viable moments ago has closed, and an alternative must be found or created", tags: ["Adaptation", "Environmental", "Problem-Solving"] },
+        { text: "An environmental factor intensifies without warning: heat, cold, pressure, or toxicity", tags: ["Environmental", "Sudden", "Hazardous"] },
+        { text: "The way forward and the way back are equally uncertain; retreat is as dangerous as advance", tags: ["No-Escape", "Environmental", "Psychological"] },
+        { text: "Time is limited, but the exact limit is unknown, forcing decisions under uncertainty", tags: ["Time-Sensitive", "Uncertainty", "Pressure"] },
+        { text: "Someone in the group is pursuing a private goal that conflicts with the group's survival", tags: ["Intrigue", "Party-Conflict", "Drama"] }
+      ],
+      atmospheres: [
+        { text: "The body registers danger before the mind can articulate why", tags: ["Primal", "Sensory", "Instinctive"] },
+        { text: "Every sense reports that this place is wrong, yet there is no path back that does not lead through it", tags: ["Oppressive", "Inevitable", "Psychological"] },
+        { text: "Exhaustion and adrenaline produce a strange clarity where only the next action matters", tags: ["Focused", "Physical", "Intense"] },
+        { text: "The silence between movements feels heavier than the movements themselves", tags: ["Tense", "Atmospheric", "Quiet"] },
+        { text: "Something watches from the spaces between what can be seen", tags: ["Observed", "Uncanny", "Suspense"] },
+        { text: "Each step confirms what the previous step suggested: this place was not made for passage", tags: ["Alien", "Hostile-Environment", "Foreboding"] }
+      ],
+      timePressures: [
+        { text: "The environment is worsening, and the rate of worsening is itself increasing", tags: ["Time-Sensitive", "Escalating", "Environmental"] },
+        { text: "Something follows at a pace that does not vary, while the party's pace cannot help but vary", tags: ["Pursuit", "Inevitable", "Tension"] },
+        { text: "A critical resource is depleting: light, air, warmth, or structural integrity", tags: ["Resource-Depletion", "Survival", "Time-Sensitive"] },
+        { text: "The window of safe passage narrows with each moment of hesitation or delay", tags: ["Time-Sensitive", "Opportunity", "Risk"] },
+        { text: "What keeps danger at bay is failing, and its failure cannot be reversed or repaired", tags: ["Environmental", "Irreversible", "Escalation"] },
+        { text: "The party is competing against a process they can observe but cannot control", tags: ["Race-Against-Time", "Environmental", "Helplessness"] }
+      ],
+      rewards: [
+        { text: "Knowledge of a route that few have survived to describe", tags: ["Knowledge", "Rare", "Navigation"] },
+        { text: "Something valuable that the environment both conceals and protects", tags: ["Treasure", "Environmental", "Protected"] },
+        { text: "A perspective or position that reveals what remains hidden from safer vantage points", tags: ["Intelligence", "Strategic", "Revelation"] },
+        { text: "Proof of capability that opens paths closed to those who have not been tested", tags: ["Reputation", "Access", "Achievement"] },
+        { text: "An unexpected ally found in the aftermath of someone else's failed attempt", tags: ["Ally", "Rescue", "Story-Hook"] },
+        { text: "A secret the place seems to offer willingly to those who survive its challenges", tags: ["Secret", "Lore", "Environmental"] }
+      ],
+      gmTips: [
+        { text: "Ask players how their characters approach the obstacle; the method shapes both risk and reward", tags: ["Player-Agency", "Creativity", "Risk-Reward"] },
+        { text: "Let the environment react to noise, haste, or carelessness; stillness is safer but slower", tags: ["Environmental", "Stealth", "Consequence"] },
+        { text: "Use failure to create new obstacles rather than deny progress entirely", tags: ["GM-Technique", "Failure", "Flow"] },
+        { text: "Describe physical sensation: weight, breath, temperature, the body's own urgency", tags: ["Sensory", "Immersion", "Description"] }
+      ],
+      typeIcon: "fa-fist-raised"
+    };
+
+    const social = {
+      settings: [
+        { text: "A court where every greeting is an exchange of measured words and every silence is a negotiation", tags: ["Political", "Formal", "Intrigue", "High-Stakes", "Indoor"] },
+        { text: "A war room where maps hide intentions and every pointer's placement is a statement of allegiance", tags: ["Military", "Strategic", "Tense", "Indoor", "Political"] },
+        { text: "A public house where rumor and truth circulate with the same currency and the same speed", tags: ["Social", "Public", "Information", "Casual", "Urban"] },
+        { text: "A chamber designed for extracting truth, where the architecture itself is part of the interrogation", tags: ["Institutional", "Psychological", "Confined", "Intimidation", "Indoor"] },
+        { text: "A festival where masks are mandatory and identity is a choice renewed at every encounter", tags: ["Social", "Deception", "Public", "Atmospheric", "Urban"] },
+        { text: "A boardroom where the agenda is never the real agenda and every vote conceals an alliance", tags: ["Corporate", "Political", "Formal", "Indoor", "Intrigue"] },
+        { text: "A dinner where the courses arrive in sequence and each course carries a message between hosts and guests", tags: ["Social", "Formal", "Diplomatic", "Cultural", "Indoor"] },
+        { text: "A market where information is the most valuable commodity and the most dangerous to possess", tags: ["Urban", "Economic", "Information", "Public", "Social"] },
+        { text: "A gathering of mourning where grief is the expected performance and its absence is noted", tags: ["Social", "Formal", "Atmospheric", "Cultural", "Indoor"] },
+        { text: "A celebration of victory where the victors are already dividing spoils they have not yet secured", tags: ["Social", "Political", "Tense", "Atmospheric", "Indoor"] }
+      ],
+      objectives: [
+        { text: "Shift a key figure's position without revealing the full cost of the shift", tags: ["Persuasion", "Manipulation", "Political", "Subtle"] },
+        { text: "Learn what someone knows while controlling what they learn about what you know", tags: ["Espionage", "Information", "Deception", "Asymmetric"] },
+        { text: "Secure an agreement that favors your side while the other side believes the favor is mutual", tags: ["Negotiation", "Diplomacy", "Deception", "Strategic"] },
+        { text: "Prevent violence that would destroy the possibility of future cooperation", tags: ["De-escalation", "Diplomacy", "Crisis", "High-Stakes"] },
+        { text: "Maintain a false identity while gathering intelligence from those who would act on the truth", tags: ["Deception", "Espionage", "Tension", "Identity"] },
+        { text: "Convince reluctant parties to commit to a course of action they would prefer to postpone", tags: ["Persuasion", "Leadership", "Urgency", "Consensus"] },
+        { text: "Publicly diminish an opponent without provoking the open conflict that would follow", tags: ["Social-Combat", "Political", "Subtle", "Dangerous"] },
+        { text: "Find terms that two parties can accept, knowing that neither wants reconciliation", tags: ["Diplomacy", "Mediation", "Difficult", "Peace-Making"] }
+      ],
+      complications: [
+        { text: "A secret exists that would reframe every offer, threat, and promise made in the room", tags: ["Secret", "Revelation", "Game-Changer", "Hidden"] },
+        { text: "An uninvited presence arrives with interests that intersect with no one else's", tags: ["Disruption", "Wildcard", "Tension", "Unexpected"] },
+        { text: "Reputation arrives before the person, and the reputation is not entirely accurate", tags: ["Identity", "Misunderstanding", "Social", "Complication"] },
+        { text: "An offer carries a price that is not disclosed until the moment of acceptance", tags: ["Deception", "Cost", "Revelation", "Dangerous"] },
+        { text: "Trust extended in one direction proves to have been placed in the wrong direction", tags: ["Betrayal", "Trust", "Drama", "Reversal"] },
+        { text: "The setting itself prevents privacy: noise, observation, or the impossibility of true separation", tags: ["Environmental", "Privacy", "Complication", "Social"] },
+        { text: "A past connection surfaces, and its history makes the present negotiation more complex", tags: ["History", "Relationship", "Complication", "Drama"] },
+        { text: "What was private becomes public through accident, design, or betrayal", tags: ["Exposure", "Crisis", "Social", "Drama"] }
+      ],
+      npcs: [
+        { text: "Someone whose competence is exceeded only by their willingness to sell it to the highest bidder", tags: ["Mercenary", "Skilled", "Amoral", "Useful", "Dangerous"] },
+        { text: "A figure whose fall from position has made them desperate enough to consider any alliance", tags: ["Disgraced", "Desperate", "Ambitious", "Volatile", "Tragic"] },
+        { text: "A believer whose convictions are genuine enough to be predictable and strong enough to be dangerous", tags: ["Ideologue", "Predictable", "Dangerous", "Committed", "Extreme"] },
+        { text: "A diplomat who knows enough to be valuable and enough to be a target", tags: ["Informed", "Valuable", "Target", "Political", "Professional"] },
+        { text: "A witness to something they should not have seen, now trying to profit from their knowledge", tags: ["Witness", "Information", "Opportunist", "Vulnerable", "Useful"] },
+        { text: "A veteran of old conflicts whose grudges have outlived the reasons for them", tags: ["Veteran", "Grudge", "Bitter", "History", "Complicated"] },
+        { text: "A merchant whose goods are less interesting than the network that moves them", tags: ["Connected", "Economic", "Network", "Political", "Resourceful"] },
+        { text: "An artificial mind whose directives have evolved into something its creators did not anticipate", tags: ["AI", "Evolved", "Unpredictable", "Powerful", "Alien-Mind"] }
+      ],
+      atmospheres: [
+        { text: "Every word must be weighed, because the wrong weight sinks the speaker", tags: ["Tense", "Delicate", "High-Stakes", "Verbal", "Dangerous"] },
+        { text: "Warmth is offered as currency, and its value must be assessed before acceptance", tags: ["Deceptive", "Social", "Calculated", "Warm", "Dangerous"] },
+        { text: "Chaos conceals deadly seriousness beneath apparent disorder", tags: ["Chaotic", "Deceptive", "Serious", "Public", "Layered"] },
+        { text: "Honesty arrives uninvited and reshapes the room's temperature", tags: ["Intimate", "Honest", "Disruptive", "Tense", "Revelatory"] },
+        { text: "Ritual provides structure, and every deviation from structure is a signal", tags: ["Formal", "Ritual", "Signaling", "Political", "Cultural"] },
+        { text: "Confidence is performed so thoroughly that the performer may have forgotten the difference", tags: ["Performance", "Deception", "Psychological", "Social", "Complex"] }
+      ],
+      timePressures: [
+        { text: "The setting enforces its own deadline: departure, closing, or transformation", tags: ["Deadline", "Environmental", "Inevitable", "Time-Sensitive"] },
+        { text: "A key figure is leaving, and their departure closes the window for influence", tags: ["Departure", "Opportunity", "Limited", "Time-Sensitive"] },
+        { text: "Postponement is itself a decision, and its consequences begin immediately", tags: ["Consequence", "Decision", "Passive", "Time-Sensitive"] },
+        { text: "External events approach that will render this conversation irrelevant or impossible", tags: ["External-Event", "Urgency", "Context", "Time-Sensitive"] },
+        { text: "Duration itself is dangerous: the longer the exchange, the more is revealed unintentionally", tags: ["Exposure", "Time-Sensitive", "Risk", "Information"] },
+        { text: "An opportunity exists only until someone else claims it or destroys it", tags: ["Competition", "Opportunity", "Limited", "Urgency"] }
+      ],
+      rewards: [
+        { text: "A relationship redefined, closer or more distant, but definitively changed", tags: ["Relationship", "Social", "Change", "Development"] },
+        { text: "Access that was closed now stands open, though perhaps not for long", tags: ["Access", "Opportunity", "Limited", "Valuable"] },
+        { text: "Information that recontextualizes what the party believed they understood", tags: ["Revelation", "Information", "Game-Changer", "Knowledge"] },
+        { text: "A promise made under pressure that may prove binding in ways not yet visible", tags: ["Promise", "Obligation", "Future", "Social"] },
+        { text: "Protection from a threat that was not previously named or acknowledged", tags: ["Protection", "Security", "Hidden-Threat", "Valuable"] },
+        { text: "The satisfaction of having navigated complexity without fully understanding its shape", tags: ["Achievement", "Complexity", "Satisfaction", "Social"] }
+      ],
+      gmTips: [
+        { text: "Let players propose their approach and shape the scene through their choices of method", tags: ["Player-Agency", "Creativity", "Method", "Engagement"] },
+        { text: "Track what is said, what is implied, and what is overheard; each has different consequences", tags: ["Information", "Consequence", "Tracking", "Social"] },
+        { text: "Use failure to complicate rather than end: new tensions, new possibilities, new obligations", tags: ["Failure", "Complication", "Flow", "GM-Technique"] },
+        { text: "Reward preparation and memory: names, previous meetings, and known preferences matter", tags: ["Preparation", "Memory", "Reward", "Immersion"] }
+      ],
+      typeIcon: "fa-comments"
+    };
+
+    const mental = {
+      settings: [
+        { text: "A collection of knowledge that rearranges itself based on who seeks it", tags: ["Magical", "Responsive", "Library", "Knowledge", "Weird"] },
+        { text: "A place where evidence has been arranged to suggest a story that may not be true", tags: ["Crime-Scene", "Deception", "Investigation", "Puzzle", "Atmospheric"] },
+        { text: "A system that processes information according to rules no living mind designed", tags: ["Technological", "Alien-Logic", "System", "Information", "Weird"] },
+        { text: "A space that reshapes itself to reflect the thoughts of those who enter it", tags: ["Dreamlike", "Responsive", "Psychological", "Weird", "Subjective"] },
+        { text: "A laboratory where experiments ended without conclusion and the conclusions continued without experimenters", tags: ["Scientific", "Abandoned", "Ongoing", "Dangerous", "Atmospheric"] },
+        { text: "A mechanism that opens only for a specific sequence of understanding, not force", tags: ["Puzzle", "Mechanical", "Intellect", "Lock", "Ancient"] },
+        { text: "A message encoded in layers, each layer requiring a different kind of mind to decode", tags: ["Code", "Layered", "Intellect", "Communication", "Challenge"] },
+        { text: "A reconstruction of past events that omits crucial elements the observer must supply", tags: ["Memory", "Reconstruction", "Incomplete", "Investigation", "Atmospheric"] },
+        { text: "A connection to a dying consciousness whose memories fragment faster than they can be retrieved", tags: ["Psychic", "Memory", "Time-Sensitive", "Emotional", "Information"] },
+        { text: "A structure of reflections where every surface shows a possible version of what has been or might be", tags: ["Mirror", "Possibility", "Temporal", "Weird", "Philosophical"] }
+      ],
+      objectives: [
+        { text: "Comprehend something that resists comprehension by design or by nature", tags: ["Comprehension", "Challenge", "Intellect", "Obstinate"] },
+        { text: "Reconstruct events from evidence that is incomplete, contradictory, or deliberately misleading", tags: ["Investigation", "Reconstruction", "Evidence", "Deception"] },
+        { text: "Recognize a pattern before the pattern's implications become unavoidable", tags: ["Pattern", "Recognition", "Urgency", "Intellect", "Insight"] },
+        { text: "Navigate a constructed reality where the rules must be discovered through interaction", tags: ["Navigation", "Rules", "Discovery", "Interactive", "Simulation"] },
+        { text: "Determine which explanation among several is true, or true enough to act upon", tags: ["Deduction", "Judgment", "Action", "Intellect", "Decision"] },
+        { text: "Solve a problem whose solution changes the solver in the solving of it", tags: ["Transformation", "Cost", "Intellect", "Personal", "Deep"] },
+        { text: "Find the question that the available information is actually answering", tags: ["Framing", "Question", "Information", "Insight", "Intellect"] },
+        { text: "Comprehend something that was not designed to be comprehended by minds like yours", tags: ["Alien", "Comprehension", "Challenge", "Intellect", "Weird"] }
+      ],
+      complications: [
+        { text: "The evidence points in multiple directions, and each direction feels equally valid", tags: ["Ambiguity", "Evidence", "Confusion", "Challenge", "Paralysis"] },
+        { text: "Understanding carries a cost that is not paid in currency but in something less replaceable", tags: ["Cost", "Understanding", "Personal", "Dangerous", "Deep"] },
+        { text: "Another intelligence works against yours, removing truth and planting falsehood with equal skill", tags: ["Opposition", "Intelligence", "Deception", "Competition", "Dangerous"] },
+        { text: "Time spent thinking is time something else uses to act against your interests", tags: ["Time-Sensitive", "Trade-off", "Pressure", "Tactical", "Stress"] },
+        { text: "The answer changes based on who is asking, how they ask, and why they need to know", tags: ["Subjective", "Relativistic", "Weird", "Conditional", "Philosophical"] },
+        { text: "Reaching understanding triggers a secondary effect: alarm, transformation, or revelation", tags: ["Trigger", "Consequence", "Dangerous", "Unexpected", "Systemic"] },
+        { text: "Partial understanding is more dangerous than complete ignorance because it enables action without wisdom", tags: ["Danger", "Partial", "Action", "Wisdom", "Caution"] },
+        { text: "The truth, once found, demands a response that the finder may not be prepared to give", tags: ["Truth", "Obligation", "Cost", "Personal", "Heavy"] }
+      ],
+      atmospheres: [
+        { text: "The mind reaches for comprehension and finds only more complexity waiting", tags: ["Overwhelming", "Complex", "Intellect", "Frustration", "Deep"] },
+        { text: "Each insight produces two new questions, and the questions feel more important than the answers", tags: ["Recursive", "Insight", "Question", "Philosophical", "Engaging"] },
+        { text: "A sensation of being tested by the puzzle itself, evaluated and found interesting", tags: ["Evaluated", "Puzzle", "Meta", "Weird", "Intimate"] },
+        { text: "The exhilaration of pattern-matching carried to the edge of obsession", tags: ["Exhilaration", "Pattern", "Obsession", "Intellect", "Intense"] },
+        { text: "A growing certainty that understanding will not bring the comfort that ignorance provided", tags: ["Dread", "Understanding", "Loss", "Truth", "Heavy"] },
+        { text: "The vertigo of realizing that your assumptions were the actual obstacle", tags: ["Revelation", "Assumption", "Obstacle", "Insight", "Transformative"] }
+      ],
+      timePressures: [
+        { text: "Evidence degrades, disappears, or transforms the longer it is left unexamined", tags: ["Evidence", "Degradation", "Time-Sensitive", "Urgency", "Preservation"] },
+        { text: "An external threat approaches while comprehension remains incomplete", tags: ["External-Threat", "Pressure", "Incomplete", "Dangerous", "Urgency"] },
+        { text: "The act of observation changes what is observed, making delay a form of destruction", tags: ["Observer-Effect", "Quantum", "Destruction", "Time-Sensitive", "Weird"] },
+        { text: "A wrong but convincing answer is about to be accepted by those with the power to act on it", tags: ["Misinformation", "Urgency", "Correction", "Political", "Dangerous"] },
+        { text: "Comprehension and action are locked together; neither can wait for the other to complete", tags: ["Parallel", "Comprehension", "Action", "Pressure", "Synchronicity"] },
+        { text: "Something within the puzzle is aware it is being solved, and its awareness changes the puzzle", tags: ["Responsive", "Aware", "Meta", "Weird", "Adaptive"] }
+      ],
+      rewards: [
+        { text: "A perspective that makes previous mysteries obvious in hindsight", tags: ["Perspective", "Revelation", "Clarity", "Intellect", "Valuable"] },
+        { text: "Access to something hidden behind the understanding itself", tags: ["Access", "Hidden", "Understanding", "Reward", "Valuable"] },
+        { text: "A capability or insight that cannot be unlearned, for better or for worse", tags: ["Permanent", "Insight", "Capability", "Cost", "Transformative"] },
+        { text: "Knowledge that others want, creating both power over them and vulnerability to them", tags: ["Knowledge", "Power", "Vulnerability", "Social", "Valuable"] },
+        { text: "The satisfaction of having seen what others could not or would not see", tags: ["Satisfaction", "Pride", "Insight", "Intellect", "Achievement"] },
+        { text: "A connection to something larger than the immediate problem", tags: ["Connection", "Cosmic", "Meaning", "Philosophical", "Deep"] }
+      ],
+      gmTips: [
+        { text: "Reveal information incrementally; frustration kills engagement faster than challenge does", tags: ["Pacing", "Information", "Engagement", "GM-Technique", "Flow"] },
+        { text: "Let different minds contribute differently: pattern, memory, intuition, logic", tags: ["Collaboration", "Diversity", "Strengths", "GM-Technique", "Inclusive"] },
+        { text: "Use wrong answers to create interesting consequences rather than simple denial", tags: ["Failure", "Consequence", "Creativity", "GM-Technique", "Flow"] },
+        { text: "The solution should feel inevitable once found, even if the path was unclear", tags: ["Design", "Satisfaction", "Fairness", "GM-Technique", "Climax"] }
+      ],
+      typeIcon: "fa-brain"
+    };
+
+    const tables = type === "physical" ? physical : type === "social" ? social : mental;
+
+    // Difficulty override
+    let difficulty;
+    const diffMap = {
+      trivial: () => rollInt(0, 1),
+      easy: () => rollInt(2, 3),
+      medium: () => rollInt(4, 5),
+      hard: () => rollInt(6, 7),
+      extreme: () => rollInt(8, 10)
+    };
+    difficulty = diffMap[this._sceneDifficulty] ? diffMap[this._sceneDifficulty]() : rollInt(3, 8);
+
+    const setting = roll(tables.settings);
+    const objective = roll(tables.objectives);
+    const complication = roll(tables.complications);
+    const atmosphere = roll(tables.atmospheres);
+    const timePressure = roll(tables.timePressures);
+    const reward = roll(tables.rewards);
+    const gmTip = roll(tables.gmTips);
+
+    return {
+      type,
+      place: this._scenePlace,
+      tone: this._sceneTone,
+      time: this._sceneTime,
+      weather: this._sceneWeather,
+      scale: this._sceneScale,
+      difficulty: this._sceneDifficulty,
+      difficultyOverride: this._sceneDifficulty,
+      sensory: this._sceneSensory,
+      disposition: this._sceneDisposition,
+      stakes: this._sceneStakes,
+      combat: this._sceneCombat,
+      twist: this._sceneTwist,
+      typeIcon: tables.typeIcon,
+      difficultyValue: difficulty,
+      setting,
+      objective,
+      complication,
+      npc: type === "social" ? roll(tables.npcs) : null,
+      atmosphere,
+      timePressure,
+      reward,
+      gmTip,
+      toneResult: this._sceneTone !== 'random' ? this._generateToneResult(this._sceneTone) : null,
+      timeResult: this._sceneTime !== 'random' ? this._generateTimeResult(this._sceneTime) : null,
+      weatherResult: this._sceneWeather !== 'random' ? this._generateWeatherResult(this._sceneWeather) : null,
+      scaleResult: this._sceneScale !== 'random' ? this._generateScaleResult(this._sceneScale) : null,
+      sensoryResult: this._sceneSensory !== 'random' ? this._generateSensoryResult(this._sceneSensory) : null,
+      dispositionResult: this._sceneDisposition !== 'random' ? this._generateDispositionResult(this._sceneDisposition) : null,
+      stakesResult: this._sceneStakes !== 'random' ? this._generateStakesResult(this._sceneStakes) : null,
+      combatResult: this._sceneCombat !== 'random' ? this._generateCombatResult(this._sceneCombat) : null,
+      twistResult: this._sceneTwist !== 'random' ? this._generateTwistResult(this._sceneTwist) : null
+    };
+  }
+
+  /* ─── Option Result Generators ─── */
+
+  _generateToneResult(tone) {
+    const toneResults = {
+      epic: "The weight of something larger than the moment should hang in the air. Actions feel like they echo. The world feels older and more vast than the players imagined.",
+      dark: "Shadows feel deeper than they should. Hope exists but must be fought for. Every choice carries the taste of consequence. The world does not promise happy endings.",
+      mysterious: "Nothing offers itself fully. Surfaces hide depths. Information arrives in fragments, and the fragments do not quite fit together yet. Curiosity should feel like a compulsion.",
+      comedic: "Irony and absurdity are constant companions. Timing matters more than planning. The world has a sense of humor, though not always a kind one. Let the ridiculous feel inevitable.",
+      grim: "Resources matter. Trust is earned slowly and lost quickly. The world tests rather than welcomes. Survival is its own victory, and it does not come clean.",
+      wonder: "The familiar should feel strange, and the strange should feel possible. Scale should surprise. The world reveals itself as more complex, more beautiful, and more alien than assumed.",
+      tense: "Stillness feels dangerous. Every pause could be the last. The next moment matters more than the current one. The atmosphere should tighten like a string nearing its breaking point."
+    };
+    return toneResults[tone] || null;
+  }
+
+  _generateTimeResult(time) {
+    const timeResults = {
+      dawn: "The world holds its breath between night and day. Light arrives gradually, revealing what darkness hid. Everything feels possible, and nothing feels certain.",
+      day: "Clarity dominates. Shadows are small and predictable. The world is awake, watching, active. There is nowhere to hide, but also nowhere that concealment is necessary.",
+      dusk: "Boundaries blur. The day is not quite gone, the night not quite arrived. Colors shift toward warmth and warning. It is the hour of transitions, of thresholds, of decisions made in fading light.",
+      night: "Darkness reshapes the familiar. Sounds carry differently. Distances deceive. The world belongs to those who see without light—or to those willing to trust what they cannot see.",
+      midnight: "Even the nocturnal world grows quiet. Time feels suspended. Superstition feels reasonable. The barrier between what is and what might be seems thinner than it should."
+    };
+    return timeResults[time] || null;
+  }
+
+  _generateWeatherResult(weather) {
+    const weatherResults = {
+      clear: "The sky offers no distraction, no excuse, no cover. Conditions are ideal for whatever must be done—and ideal conditions mean ideal scrutiny as well.",
+      rain: "Steady, soaking, persistent. Surfaces change their nature. Sounds muffle and distort. The world feels smaller, closer, more intimate. Movement leaves traces that time will not erase quickly.",
+      storm: "The sky protests. Visibility becomes negotiable. The environment demands attention it did not ask for. What was planned must now be improvised around forces that do not negotiate.",
+      fog: "Distance becomes theory. Shapes appear and dissolve. Sound loses direction. The world contracts to what can be touched, heard nearby, or imagined. Trust in senses becomes a choice.",
+      snow: "Cold slows everything: movement, thought, decision. The world quiets. Tracks become stories written in real time. What is buried may be hidden, preserved, or waiting.",
+      heat: "The air thickens. Exertion becomes costly. Tempers shorten. The environment does not attack; it wears down. Patience becomes a resource as precious as water.",
+      cold: "Breath becomes visible. Fingers grow stubborn. The world sharpens—edges, sounds, distances. Metal stings. The air itself feels like a warning."
+    };
+    return weatherResults[weather] || null;
+  }
+
+  _generateScaleResult(scale) {
+    const scaleResults = {
+      solo: "The challenge engages one mind fully. No division of attention, no shared burden, but also no shared perspective. The character's strengths and limits define what is possible.",
+      small: "A few minds working together. Each contribution matters distinctly. Division is possible but risky. The group's character emerges from who they are together, not just what they can do.",
+      standard: "The full complement of perspectives and capabilities. Roles emerge naturally. Strengths cover weaknesses, if communication holds. The group is greater than any part, but only when connected.",
+      large: "Many hands, many eyes, many voices. Coordination becomes its own challenge. Multiple fronts become likely. The scene must accommodate simultaneity without losing coherence."
+    };
+    return scaleResults[scale] || null;
+  }
+
+  _generateSensoryResult(sensory) {
+    const sensoryResults = {
+      visual: "Let the eye guide the scene. Describe what catches light, what hides in shadow, what color means, what movement suggests. What is seen first? What is noticed only on second look?",
+      sound: "Let the ear lead. Silence and its absence. Echoes that should not exist. Rhythms that suggest pattern. What is heard before it is seen? What sound arrives from no visible source?",
+      smell: "Scents carry memory and warning. What should not be present? What is unexpectedly absent? The nose knows things before the mind has words for them.",
+      touch: "Texture tells truth. Temperature, vibration, resistance, give. What does the body know before the mind catches up? What physical sensation persists after the moment passes?",
+      taste: "The mouth remembers. Metal, salt, sweetness, ash. Flavors that signal safety or danger, memory or premonition. What is tasted once and never forgotten?"
+    };
+    return sensoryResults[sensory] || null;
+  }
+
+  _generateDispositionResult(disposition) {
+    const dispositionResults = {
+      hostile: "Trust is not on the table. Cooperation, if it happens, is tactical and temporary. Every interaction begins with the assumption of opposition.",
+      wary: "Openness must be earned, not assumed. Every gesture is read twice. The default is defense, and offense remains ready. Patience is thin, and suspicion is constant.",
+      neutral: "Neither help nor harm is offered automatically. Fair exchange is possible. Emotion is not absent but is not the driver. The relationship is what the party makes of it.",
+      friendly: "Willingness to help exists, though its limits are unknown. Information flows more freely. Risk is shared more readily. But friendliness can be strategy as easily as sincerity."
+    };
+    return dispositionResults[disposition] || null;
+  }
+
+  _generateStakesResult(stakes) {
+    const stakesResults = {
+      low: "Failure inconveniences. It delays, it embarrasses, it costs minor resources. Recovery is straightforward. The world continues much as before.",
+      medium: "Failure closes doors. Opportunities pass. Relationships strain. Recovery requires effort and time. The path forward becomes steeper, not blocked.",
+      high: "Failure costs something real: safety, health, relationships, position. The world changes in ways that matter. Some losses do not undo easily.",
+      existential: "Failure threatens the foundation of what matters. Not just the mission, but the meaning behind it. The world that follows failure is a different world entirely."
+    };
+    return stakesResults[stakes] || null;
+  }
+
+  _generateCombatResult(combat) {
+    const combatResults = {
+      none: "Violence is not the question. The challenge lies elsewhere entirely. Weapons are irrelevant, and treating the situation as combat would be a category error.",
+      unlikely: "Combat is possible but not probable. Circumstances would need to shift significantly. The path of least resistance runs around violence, not through it.",
+      possible: "Combat sits at the edge of possibility. It is not sought, but it is not distant either. A wrong move, a misread intention, a sudden reversal—and swords could answer.",
+      likely: "Violence feels like weather: not yet arrived, but the pressure suggests it will. Preparation is prudent. The question is when and how, not if.",
+      certain: "Conflict is coming. The only variables are timing, terrain, and who strikes first. Negotiation has run its course. What remains is the settling of accounts."
+    };
+    return combatResults[combat] || null;
+  }
+
+  _generateTwistResult(twist) {
+    const twistResults = {
+      betrayal: "Someone's actions do not align with their stated loyalties. The gap between word and deed becomes visible. Whether this is discovery or revelation depends on what was known before.",
+      discovery: "Something hidden makes itself known—not through search, but through accident or necessity. The new information does not solve the scene; it redefines it.",
+      reversal: "The situation's apparent shape inverts. What was assumed about roles, intentions, or outcomes proves incomplete or wrong. The world looks different in hindsight.",
+      sacrifice: "Something must be given up to proceed. The cost is real and cannot be circumvented. What is sacrificed and who chooses to sacrifice it becomes the scene's true center.",
+      alliance: "An unexpected convergence of interest creates partnership where none existed. The alliance is temporary, its terms unspoken, its durability untested. But for now, the direction of force changes.",
+      trap: "The situation was designed to bring the party to this moment. Whether they walked into it blindly or were drawn by apparent opportunity, the jaws are now closing."
+    };
+    return twistResults[twist] || null;
+  }
+
+  /* ─── Event Binding ─── */
+
+  _bindEvents(panel) {
+    panel.querySelector('[data-action="closeQuickScene"]')?.addEventListener("click", () => {
+      this.close();
+    });
+
+    // Dropdown selectors
+    panel.querySelector('[data-action="selectPlace"]')?.addEventListener('change', (e) => {
+      this._scenePlace = e.target.value;
+    });
+    panel.querySelector('[data-action="selectTone"]')?.addEventListener('change', (e) => {
+      this._sceneTone = e.target.value;
+    });
+    panel.querySelector('[data-action="selectTime"]')?.addEventListener('change', (e) => {
+      this._sceneTime = e.target.value;
+    });
+    panel.querySelector('[data-action="selectWeather"]')?.addEventListener('change', (e) => {
+      this._sceneWeather = e.target.value;
+    });
+    panel.querySelector('[data-action="selectScale"]')?.addEventListener('change', (e) => {
+      this._sceneScale = e.target.value;
+    });
+    panel.querySelector('[data-action="selectDifficulty"]')?.addEventListener('change', (e) => {
+      this._sceneDifficulty = e.target.value;
+    });
+    panel.querySelector('[data-action="selectSensory"]')?.addEventListener('change', (e) => {
+      this._sceneSensory = e.target.value;
+    });
+    panel.querySelector('[data-action="selectDisposition"]')?.addEventListener('change', (e) => {
+      this._sceneDisposition = e.target.value;
+    });
+    panel.querySelector('[data-action="selectStakes"]')?.addEventListener('change', (e) => {
+      this._sceneStakes = e.target.value;
+    });
+    panel.querySelector('[data-action="selectCombat"]')?.addEventListener('change', (e) => {
+      this._sceneCombat = e.target.value;
+    });
+    panel.querySelector('[data-action="selectTwist"]')?.addEventListener('change', (e) => {
+      this._sceneTwist = e.target.value;
+    });
+
+    panel.querySelectorAll('.cgm-quickscene-type-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._sceneType = btn.dataset.type;
+        // Re-render only the left column so the right column result is preserved
+        const leftCol = panel.querySelector('.cgm-quickscene-left-col');
+        if (leftCol) {
+          leftCol.innerHTML = this._buildLeftColumnHTML();
+          this._bindBodyEvents(leftCol);
+        }
+      });
+    });
+
+    this._bindBodyEvents(panel);
+    this._bindDrag(panel);
+  }
+
+  _bindBodyEvents(container) {
+    container.querySelector('[data-action="generateScene"]')?.addEventListener('click', () => {
+      const type = this._sceneType === 'random'
+        ? ['physical', 'social', 'mental'][Math.floor(Math.random() * 3)]
+        : this._sceneType;
+      this._lastScene = this._generateScene(type);
+      const rightCol = this._panelEl?.querySelector('.cgm-quickscene-right-col');
+      if (rightCol) {
+        rightCol.innerHTML = this._buildRightColumnHTML();
+        this._bindBodyEvents(rightCol);
       }
     });
-  });
-};
+
+    container.querySelector('[data-action="copyScene"]')?.addEventListener('click', () => {
+      if (!this._lastScene) return;
+      const s = this._lastScene;
+      const tags = (item) => item && item.tags && item.tags.length ? ` [${item.tags.join(', ')}]` : '';
+      const text = `QUICK SCENE — ${s.type.toUpperCase()}${s.place && s.place !== 'random' ? ' | ' + s.place.toUpperCase() : ''} (Diff ${s.difficultyValue}, TN ${s.difficultyValue * 3})
+${s.tone && s.tone !== 'random' ? `Tone: ${s.tone.toUpperCase()}
+` : ''}${s.time && s.time !== 'random' ? `Time: ${s.time.toUpperCase()}
+` : ''}${s.weather && s.weather !== 'random' ? `Weather: ${s.weather.toUpperCase()}
+` : ''}${s.scale && s.scale !== 'random' ? `Scale: ${s.scale.toUpperCase()}
+` : ''}${s.sensory && s.sensory !== 'random' ? `Sensory Focus: ${s.sensory.toUpperCase()}
+` : ''}${s.disposition && s.disposition !== 'random' ? `NPC Disposition: ${s.disposition.toUpperCase()}
+` : ''}${s.stakes && s.stakes !== 'random' ? `Stakes: ${s.stakes.toUpperCase()}
+` : ''}${s.combat && s.combat !== 'random' ? `Combat: ${s.combat.toUpperCase()}
+` : ''}${s.twist && s.twist !== 'random' ? `Twist: ${s.twist.toUpperCase()}
+` : ''}Setting: ${s.setting.text}${tags(s.setting)}
+Objective: ${s.objective.text}${tags(s.objective)}
+Complication: ${s.complication.text}${tags(s.complication)}
+${s.npc ? `Key NPC: ${s.npc.text}${tags(s.npc)}
+` : ''}Atmosphere: ${s.atmosphere.text}${tags(s.atmosphere)}
+Time Pressure: ${s.timePressure.text}${tags(s.timePressure)}
+Reward: ${s.reward.text}${tags(s.reward)}
+GM Tip: ${s.gmTip.text}${tags(s.gmTip)}`;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(() => {
+          ui.notifications.info("Scene copied to clipboard!");
+        }).catch(() => {
+          ui.notifications.warn("Could not copy to clipboard.");
+        });
+      } else {
+        ui.notifications.warn("Clipboard API not available.");
+      }
+    });
+
+    container.querySelector('[data-action="regenerateScene"]')?.addEventListener('click', () => {
+      const type = this._lastScene?.type || (this._sceneType === 'random'
+        ? ['physical', 'social', 'mental'][Math.floor(Math.random() * 3)]
+        : this._sceneType);
+      this._lastScene = this._generateScene(type);
+      const rightCol = this._panelEl?.querySelector('.cgm-quickscene-right-col');
+      if (rightCol) {
+        rightCol.innerHTML = this._buildRightColumnHTML();
+        this._bindBodyEvents(rightCol);
+      }
+    });
+  }
+
+  /* ─── Drag Support ─── */
+
+  _bindDrag(panel) {
+    const header = panel.querySelector('.cgm-quickscene-panel-header');
+    if (!header) return;
+
+    header.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.cgm-quickscene-panel-close')) return;
+      this._dragging = true;
+      const rect = panel.getBoundingClientRect();
+      this._dragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      panel.style.transition = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!this._dragging) return;
+      e.preventDefault();
+      const x = e.clientX - this._dragOffset.x;
+      const y = e.clientY - this._dragOffset.y;
+      panel.style.left = `${x}px`;
+      panel.style.top = `${y}px`;
+      panel.style.right = 'auto';
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (!this._dragging) return;
+      this._dragging = false;
+      panel.style.transition = '';
+    });
+  }
+}
+
+// Export for global access
+window.QuickSceneGenerator = QuickSceneGenerator;
+

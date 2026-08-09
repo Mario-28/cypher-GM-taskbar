@@ -1,16 +1,12 @@
 {
   "id": "cypher-gm-taskbar",
   "title": "Cypher GM Taskbar",
-  "description": "A GM-only taskbar for the Cypher System with party overview, combat tracker, intrusions, cyphers, recovery, and quick-reference panels.",
-  "version": "3.19.0",
+  "description": "A GM-only taskbar for the Cypher System with party overview, combat tracker, intrusions, cyphers, recovery, scene control, NPC canvas, quick scene generator, and quick-reference panels.",
+  "version": "3.33.0",
   "type": "module",
-  "authors": [
-    {
-      "name": "Cypher GM Taskbar"
-    }
-  ],
+  "authors": [{ "name": "Cypher GM Taskbar" }],
   "compatibility": {
-    "minimum": "14",
+    "minimum": "13",
     "verified": "14",
     "maximum": "15"
   },
@@ -19,18 +15,12 @@
       {
         "id": "cyphersystem",
         "type": "system",
-        "compatibility": {
-          "minimum": "2"
-        }
+        "compatibility": { "minimum": "2" }
       }
     ]
   },
-  "scripts": [
-    "scripts/cypher-gm-taskbar.js"
-  ],
-  "styles": [
-    "styles/cypher-gm-taskbar.css"
-  ],
+  "scripts": ["scripts/scene-control.js", "scripts/npc-canvas.js", "scripts/cypher-gm-taskbar.js"],
+  "styles": ["styles/cypher-gm-taskbar.css"],
   "languages": [
     {
       "lang": "en",
@@ -38,10 +28,7 @@
       "path": "lang/en.json"
     }
   ],
-  "socket": false,
+  "socket": true,
   "readme": "README.md",
-  "license": "LICENSE",
-  "url": "https://github.com/Mario-28/cypher-GM-taskbar",
-  "manifest": "https://raw.githubusercontent.com/Mario-28/cypher-GM-taskbar/main/module.json",
-  "download": "https://github.com/Mario-28/cypher-GM-taskbar/archive/refs/heads/main.zip"
+  "license": "LICENSE"
 }
