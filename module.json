@@ -2,7 +2,7 @@
   "id": "cypher-gm-taskbar",
   "title": "Cypher GM Taskbar",
   "description": "A GM-only taskbar for the Cypher System with party overview, combat tracker, intrusions, cyphers, recovery, scene control, NPC canvas, quick scene generator, and quick-reference panels.",
-  "version": "3.34.0",
+  "version": "3.42.7",
   "type": "module",
   "authors": [{ "name": "Cypher GM Taskbar" }],
   "compatibility": {
@@ -19,7 +19,7 @@
       }
     ]
   },
-  "scripts": ["scripts/scene-control.js", "scripts/npc-canvas.js", "scripts/cypher-gm-taskbar.js"],
+  "scripts": ["scripts/scene-control.js", "scripts/npc-canvas.js", "scripts/group-statuses.js", "scripts/cypher-gm-taskbar.js"],
   "styles": ["styles/cypher-gm-taskbar.css"],
   "languages": [
     {

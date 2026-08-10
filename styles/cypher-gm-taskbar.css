@@ -6075,3 +6075,400 @@
   border-color: #c8a96e !important;
   box-shadow: 0 0 10px rgba(200,169,110,0.2);
 }
+
+/* GM Group Roll segment colors */
+.cgm-pie-seg-attributes { fill: rgba(231, 76, 60, 0.7); stroke: rgba(231, 76, 60, 0.9); }
+.cgm-pie-seg-attributes:hover { fill: rgba(231, 76, 60, 0.9); }
+.cgm-pie-label-attributes { color: #e74c3c; }
+
+.cgm-pie-seg-skills { fill: rgba(52, 152, 219, 0.7); stroke: rgba(52, 152, 219, 0.9); }
+.cgm-pie-seg-skills:hover { fill: rgba(52, 152, 219, 0.9); }
+.cgm-pie-label-skills { color: #3498db; }
+
+.cgm-pie-seg-freeroll { fill: rgba(46, 204, 113, 0.7); stroke: rgba(46, 204, 113, 0.9); }
+.cgm-pie-seg-freeroll:hover { fill: rgba(46, 204, 113, 0.9); }
+.cgm-pie-label-freeroll { color: #2ecc71; }
+
+.cgm-pie-seg-defense { fill: rgba(241, 196, 15, 0.7); stroke: rgba(241, 196, 15, 0.9); }
+.cgm-pie-seg-defense:hover { fill: rgba(241, 196, 15, 0.9); }
+.cgm-pie-label-defense { color: #f1c40f; }
+
+/* GM Group Roll button red glow */
+.cgm-section-btn-gmroll:hover i {
+  filter: drop-shadow(0 0 6px #d94040);
+}
+
+/* Drag & drop states for radial menus */
+.cgm-radial-menu {
+  cursor: grab;
+}
+.cgm-radial-menu.cgm-menu-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+.cgm-radial-menu .cgm-pie-seg,
+.cgm-radial-menu .cgm-pie-label,
+.cgm-radial-menu .cgm-gmroll-back {
+  cursor: pointer;
+}
+
+/* Back arrow in submenu center */
+.cgm-gmroll-back {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(15,17,30,0.98);
+  border: 1.5px solid rgba(200,169,110,0.3);
+  display: grid;
+  place-items: center;
+  color: #c8a96e;
+  font-size: 14px;
+  z-index: 10;
+  transition: all 0.2s ease;
+  pointer-events: auto;
+}
+.cgm-gmroll-back:hover {
+  background: rgba(200,169,110,0.2);
+  border-color: #c8a96e;
+  color: #f8e1a9;
+  box-shadow: 0 0 10px rgba(200,169,110,0.25);
+  transform: translate(-50%, -50%) scale(1.1);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   GROUP STATUSES MENU
+   ═══════════════════════════════════════════════════════════ */
+
+/* Section button */
+.cgm-section-btn-groupstatus:hover i {
+  filter: drop-shadow(0 0 6px rgba(231, 76, 60, 0.6));
+}
+
+/* Main menu — dark slices with golden borders */
+.cgm-gstatus-seg-status {
+  fill: rgba(40, 30, 50, 0.85);
+  stroke: rgba(212, 175, 55, 0.9);
+  stroke-width: 1.5;
+}
+.cgm-gstatus-seg-status:hover {
+  fill: rgba(60, 45, 75, 0.9);
+  stroke: rgba(255, 215, 100, 1);
+}
+.cgm-gstatus-seg-attr {
+  fill: rgba(30, 35, 50, 0.85);
+  stroke: rgba(212, 175, 55, 0.9);
+  stroke-width: 1.5;
+}
+.cgm-gstatus-seg-attr:hover {
+  fill: rgba(45, 55, 75, 0.9);
+  stroke: rgba(255, 215, 100, 1);
+}
+.cgm-gstatus-seg-health {
+  fill: rgba(50, 25, 30, 0.85);
+  stroke: rgba(212, 175, 55, 0.9);
+  stroke-width: 1.5;
+}
+.cgm-gstatus-seg-health:hover {
+  fill: rgba(75, 40, 45, 0.9);
+  stroke: rgba(255, 215, 100, 1);
+}
+
+/* Submenu — dark neutral slices with golden borders */
+.cgm-gstatus-seg-neutral {
+  fill: rgba(35, 35, 42, 0.85);
+  stroke: rgba(212, 175, 55, 0.85);
+  stroke-width: 1.5;
+}
+.cgm-gstatus-seg-neutral:hover {
+  fill: rgba(55, 55, 65, 0.9);
+  stroke: rgba(255, 215, 100, 1);
+}
+
+/* Labels & icons — ALL WHITE */
+.cgm-gstatus-label i,
+.cgm-gstatus-sub-label i {
+  font-size: 14px;
+  color: #ffffff;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+}
+.cgm-gstatus-label .cgm-gstatus-text,
+.cgm-gstatus-sub-label .cgm-gstatus-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.cgm-gstatus-label .cgm-gstatus-line,
+.cgm-gstatus-sub-label .cgm-gstatus-line {
+  font-size: 8px;
+  font-weight: 600;
+  color: #ffffff;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  line-height: 1.1;
+}
+.cgm-gstatus-sub-label .cgm-gstatus-line {
+  font-size: 9px;
+}
+
+/* Center close button with red drop */
+.cgm-gstatus-close-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  background: rgba(15, 17, 30, 0.98);
+  border: 2px solid rgba(212, 175, 55, 0.6);
+  transition: border-color 0.2s, background 0.2s;
+}
+.cgm-gstatus-close-btn:hover {
+  border-color: rgba(255, 215, 100, 0.9);
+  background: rgba(25, 20, 40, 0.98);
+}
+.cgm-gstatus-close-btn i {
+  font-size: 22px;
+  color: #e74c3c;
+  filter: drop-shadow(0 0 4px rgba(231, 76, 60, 0.6));
+}
+
+/* Group Statuses POOLS submenu — reuses .cgm-pools-submenu base */
+.cgm-gstatus-pools .cgm-pools-label i { font-size: 36px; }
+.cgm-gstatus-pools .cgm-pools-adjuster {
+  padding: 3px 5px;
+  gap: 2px;
+}
+.cgm-gstatus-pools .cgm-pools-adj-name {
+  font-size: 10px;
+}
+.cgm-gstatus-pools .cgm-pools-adj-value {
+  font-size: 16px;
+  min-width: 24px;
+}
+.cgm-gstatus-pools .cgm-pools-adj-edge {
+  font-size: 8px;
+}
+.cgm-gstatus-pools .cgm-pools-adj-btn {
+  width: 22px;
+  height: 22px;
+  font-size: 14px;
+}
+
+/* Delta display in attribute adjuster */
+.cgm-gstatus-delta {
+  font-size: 18px;
+  font-weight: 700;
+  color: #aaaaaa;
+  min-width: 30px;
+  text-align: center;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  transition: color 0.15s ease;
+}
+
+/* Confirm button in center */
+.cgm-gstatus-confirm-btn {
+  background: rgba(50, 120, 50, 0.3) !important;
+  border-color: rgba(64, 176, 96, 0.5) !important;
+}
+.cgm-gstatus-confirm-btn:hover {
+  background: rgba(64, 176, 96, 0.5) !important;
+  border-color: rgba(100, 255, 150, 0.8) !important;
+  transform: translate(-50%, -50%) scale(1.15) !important;
+}
+.cgm-gstatus-confirm-btn i {
+  color: #66dd88 !important;
+  font-size: 16px;
+}
+
+/* Confirm dialog */
+.cgm-groupstatus-confirm {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.9);
+  width: 360px;
+  max-height: 80vh;
+  background: linear-gradient(145deg, rgba(18, 14, 28, 0.98) 0%, rgba(24, 19, 38, 0.98) 100%);
+  border: 1px solid rgba(155, 89, 182, 0.3);
+  border-radius: 16px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.7), 0 0 20px rgba(155, 89, 182, 0.1);
+  z-index: 100000;
+  opacity: 0;
+  transition: opacity 0.25s cubic-bezier(0.16,1,0.3,1), transform 0.25s cubic-bezier(0.16,1,0.3,1);
+  pointer-events: none;
+  overflow-y: auto;
+}
+.cgm-groupstatus-confirm.cgm-confirm-visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+  pointer-events: all;
+}
+.cgm-confirm-dialog {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cgm-confirm-dialog h3 {
+  margin: 0;
+  font-family: "Bebas Neue", sans-serif;
+  font-size: 20px;
+  color: #9b59b6;
+  letter-spacing: 1.5px;
+  text-align: center;
+}
+.cgm-confirm-subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--cgm-text-dim);
+  text-align: center;
+}
+.cgm-confirm-actors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.cgm-confirm-actor {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(155,89,182,0.15);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.cgm-confirm-actor:hover {
+  background: rgba(155,89,182,0.08);
+  border-color: rgba(155,89,182,0.3);
+}
+.cgm-confirm-actor input[type="checkbox"] {
+  display: none;
+}
+.cgm-confirm-check {
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid rgba(155,89,182,0.4);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.cgm-confirm-actor input[type="checkbox"]:checked + .cgm-confirm-check {
+  background: rgba(155,89,182,0.3);
+  border-color: #9b59b6;
+}
+.cgm-confirm-actor input[type="checkbox"]:checked + .cgm-confirm-check::after {
+  content: "✓";
+  color: #9b59b6;
+  font-size: 10px;
+  font-weight: 700;
+}
+.cgm-confirm-actor img {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid rgba(155,89,182,0.3);
+}
+.cgm-confirm-actor span {
+  font-size: 13px;
+  color: var(--cgm-text);
+}
+.cgm-confirm-all {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--cgm-text-dim);
+  border-top: 1px solid rgba(155,89,182,0.15);
+}
+.cgm-confirm-all input {
+  accent-color: #9b59b6;
+}
+.cgm-confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  padding-top: 6px;
+}
+.cgm-confirm-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+  border: none;
+}
+.cgm-confirm-cancel {
+  background: rgba(255,255,255,0.05);
+  color: var(--cgm-text-dim);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.cgm-confirm-cancel:hover {
+  background: rgba(255,255,255,0.1);
+}
+.cgm-confirm-ok {
+  background: rgba(155,89,182,0.25);
+  color: #c9a0dc;
+  border: 1px solid rgba(155,89,182,0.4);
+}
+.cgm-confirm-ok:hover {
+  background: rgba(155,89,182,0.4);
+  color: #fff;
+}
+
+/* ── GM Group Roll Main Menu — black labels ── */
+.cgm-gmroll-main .cgm-pie-label i,
+.cgm-gmroll-main .cgm-pie-label span {
+  color: #000 !important;
+  text-shadow: none !important;
+}
+.cgm-gmroll-main .cgm-pie-label:hover i,
+.cgm-gmroll-main .cgm-pie-label.cgm-pie-label-active i,
+.cgm-gmroll-main .cgm-pie-label:hover span,
+.cgm-gmroll-main .cgm-pie-label.cgm-pie-label-active span {
+  color: #000 !important;
+}
+
+/* ── GM Group Roll Submenu — larger stacked labels ── */
+.cgm-gmroll-sub-label i {
+  font-size: 15px !important;
+}
+.cgm-gmroll-sub-label .cgm-gmroll-sub-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.cgm-gmroll-sub-label .cgm-gmroll-sub-word {
+  font-size: 9px !important;
+  font-weight: 600;
+  line-height: 1.1;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}

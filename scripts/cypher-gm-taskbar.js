@@ -75,6 +75,12 @@ class GMTaskbar {
     this._damageSubMenuEl = null;
     this._recoverySubMenuEl = null;
     this._cyphersSubMenuEl = null;
+    this._gmGroupRollMenuEl = null;
+    this._gmGroupRollAttributesEl = null;
+    this._gmGroupRollSkillsEl = null;
+    this._gmGroupRollFreeEl = null;
+    this._gmGroupRollDefenseEl = null;
+    this._groupStatuses = new GroupStatusesMenu(this);
     this._subMenuPositions = {};
     this._lastDifficulty = 0;
     this._loadSettings();
@@ -214,6 +220,12 @@ class GMTaskbar {
     const gd = this._globalDifficulty;
     const tn = gd * 3;
     const secHTML = this._buildSectionHTML(0, `
+      <button class="cgm-section-btn cgm-section-btn-gmroll" data-action="openGMGroupRoll" title="GM Group Roll Request">
+        <i class="fas fa-dice-d20" style="color:#d94040;"></i>
+      </button>
+      <button class="cgm-section-btn cgm-section-btn-groupstatus" data-action="openGroupStatuses" title="Group Statuses">
+        <i class="fas fa-droplet" style="color:#9b59b6;"></i>
+      </button>
       <button class="cgm-section-btn cgm-section-btn-quickscene" data-action="openQuickScene" title="Quick Scene">
         <i class="fas fa-dice-d20"></i>
       </button>
@@ -782,6 +794,556 @@ ${paths}  </svg>
     this._hideCallForRollSubMenu();
     this._hideCallForRollSkillSubMenu();
     this._hideCallForRollFrequentSubMenu();
+    this._hideGMGroupRollMenu();
+    this._hideGMGroupRollAttributes();
+    this._hideGMGroupRollSkills();
+    this._hideGMGroupRollFree();
+    this._hideGMGroupRollDefense();
+    this._groupStatuses.hide();
+  }
+
+  /* ─── GM Group Roll Request ─── */
+
+  _showGMGroupRollMenu(btnEl) {
+    this._hideGMGroupRollMenu();
+    this._hideGMGroupRollAttributes();
+    this._hideGMGroupRollSkills();
+    this._hideGMGroupRollFree();
+    this._hideGMGroupRollDefense();
+
+    const size = this._radialMenuSize;
+    const offset = this._radialMenuOffset;
+    const segCount = 4;
+    const gap = 2;
+    const outerR = size / 2 - 6;
+    const innerR = outerR * 0.38;
+    const half = size / 2;
+
+    const segments = [
+      { action: "rollAttributes", icon: "fa-hand-fist",   label: "Attributes", isAttributes: true },
+      { action: "rollSkill",      icon: "fa-scroll",      label: "Skills",     isSkills: true },
+      { action: "freeRoll",       icon: "fa-dice",        label: "Free Roll",  isFreeRoll: true },
+      { action: "defenseRoll",    icon: "fa-shield-halved", label: "Defense",  isDefense: true },
+    ];
+
+    // SVG paths — same style as portrait radial menu
+    let svgPaths = "";
+    segments.forEach((seg, i) => {
+      const startAngle = i * (360 / segCount) + gap / 2;
+      const endAngle = (i + 1) * (360 / segCount) - gap / 2;
+      const d = this._pieWedgePath(startAngle, endAngle, innerR, outerR);
+      let specialClass = "";
+      if (seg.isAttributes) specialClass = "cgm-pie-seg-attributes";
+      else if (seg.isSkills)     specialClass = "cgm-pie-seg-skills";
+      else if (seg.isFreeRoll)   specialClass = "cgm-pie-seg-freeroll";
+      else if (seg.isDefense)    specialClass = "cgm-pie-seg-defense";
+      svgPaths += `<path class="cgm-pie-seg ${specialClass}" data-action="${seg.action}" d="${d}" />`;
+    });
+
+    // Labels — same positioning as portrait menu
+    let labelsHtml = "";
+    segments.forEach((seg, i) => {
+      const midAngle = (i * (360 / segCount) + ((i + 1) * (360 / segCount))) / 2;
+      const rad = (midAngle - 90) * Math.PI / 180;
+      const labelR = (innerR + outerR) / 2;
+      const lx = Math.cos(rad) * labelR + half;
+      const ly = Math.sin(rad) * labelR + half;
+      let specialLabelClass = "";
+      if (seg.isAttributes) specialLabelClass = "cgm-pie-label-attributes";
+      else if (seg.isSkills)     specialLabelClass = "cgm-pie-label-skills";
+      else if (seg.isFreeRoll)   specialLabelClass = "cgm-pie-label-freeroll";
+      else if (seg.isDefense)    specialLabelClass = "cgm-pie-label-defense";
+      labelsHtml += `
+        <div class="cgm-pie-label ${specialLabelClass}" data-action="${seg.action}"
+             style="left:${lx.toFixed(1)}px;top:${ly.toFixed(1)}px;">
+          <i class="fas ${seg.icon}"></i>
+          <span>${seg.label}</span>
+        </div>
+      `;
+    });
+
+    const menu = document.createElement("div");
+    menu.className = "cgm-radial-menu cgm-gmroll-main";
+    menu.style.width = `${size}px`;
+    menu.style.height = `${size}px`;
+
+    // Position menu — detect edge and open AWAY from closest border (same as portrait)
+    const savedPos = this._loadMenuPosition("gmGroupRollMain");
+    if (savedPos) {
+      menu.style.left = `${Math.max(0, Math.min(savedPos.left, window.innerWidth - size))}px`;
+      menu.style.top = `${Math.max(0, Math.min(savedPos.top, window.innerHeight - size))}px`;
+    } else {
+      const rect = btnEl.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) {
+        console.warn("Cypher GM Taskbar: GM Group Roll button rect is empty");
+        return;
+      }
+      const btnCx = rect.left + rect.width / 2;
+      const btnCy = rect.top + rect.height / 2;
+
+      const spaceAbove = btnCy - size / 2;
+      const spaceBelow = window.innerHeight - btnCy - size / 2;
+      let menuLeft = btnCx - size / 2;
+      let menuTop;
+      if (spaceAbove >= size + offset && spaceAbove >= spaceBelow) {
+        menuTop = rect.top - size - offset;
+      } else if (spaceBelow >= size + offset) {
+        menuTop = rect.bottom + offset;
+      } else if (spaceAbove >= size + offset) {
+        menuTop = rect.top - size - offset;
+      } else {
+        menuTop = (window.innerHeight - size) / 2;
+      }
+
+      menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - size - 8));
+      menuTop = Math.max(8, Math.min(menuTop, window.innerHeight - size - 8));
+
+      menu.style.left = `${menuLeft}px`;
+      menu.style.top = `${menuTop}px`;
+    }
+
+    // Same SVG structure as portrait radial menu
+    menu.innerHTML = `
+      <svg class="cgm-pie-svg" viewBox="-${half} -${half} ${size} ${size}" width="${size}" height="${size}">
+        <defs>
+          <radialGradient id="cgm-pie-bg" cx="0" cy="0" r="${outerR}">
+            <stop offset="0%" stop-color="rgba(20,22,35,0.3)" />
+            <stop offset="100%" stop-color="rgba(15,17,30,0.95)" />
+          </radialGradient>
+        </defs>
+        <circle cx="0" cy="0" r="${outerR}" fill="url(#cgm-pie-bg)" stroke="rgba(200,169,110,0.15)" stroke-width="1" />
+        ${svgPaths}
+        <circle cx="0" cy="0" r="${innerR - 2}" fill="rgba(15,17,30,0.98)" stroke="rgba(200,169,110,0.3)" stroke-width="1.5" />
+      </svg>
+      ${labelsHtml}
+      <div class="cgm-pie-portrait" style="background:rgba(30,33,52,0.95);display:grid;place-items:center;">
+        <i class="fas fa-dice-d20" style="font-size:28px;color:#d94040;"></i>
+      </div>
+    `;
+
+    document.body.appendChild(menu);
+    this._gmGroupRollMenuEl = menu;
+    requestAnimationFrame(() => menu.classList.add("cgm-radial-visible"));
+
+    // Draw line from button to main menu
+    const btnRect = btnEl.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    this._createGMGroupRollLine("cgm-gmroll-line-main", btnRect.left + btnRect.width / 2, btnRect.top + btnRect.height / 2, menuRect.left + menuRect.width / 2, menuRect.top + menuRect.height / 2);
+
+    // Make draggable
+    this._cleanupGMGroupRollDrag = this._makeMenuDraggable(menu, "gmGroupRollMain");
+    const onSegClick = (e) => {
+      e.stopPropagation();
+      const action = e.currentTarget.dataset.action;
+      // Don't close main menu — it stays open while submenu is active
+      if (action === "rollAttributes") this._showGMGroupRollAttributes(btnEl);
+      else if (action === "rollSkill")      this._showGMGroupRollSkills(btnEl);
+      else if (action === "freeRoll")       this._showGMGroupRollFree(btnEl);
+      else if (action === "defenseRoll")    this._showGMGroupRollDefense(btnEl);
+    };
+    menu.querySelectorAll(".cgm-pie-seg, .cgm-pie-label").forEach(el => {
+      el.addEventListener("click", onSegClick);
+    });
+
+    // Hover sync — same as portrait menu
+    menu.querySelectorAll(".cgm-pie-seg").forEach(seg => {
+      const action = seg.dataset.action;
+      const label = menu.querySelector(`.cgm-pie-label[data-action="${action}"]`);
+      seg.addEventListener("mouseenter", () => label?.classList.add("cgm-pie-label-active"));
+      seg.addEventListener("mouseleave", () => label?.classList.remove("cgm-pie-label-active"));
+    });
+    menu.querySelectorAll(".cgm-pie-label").forEach(lbl => {
+      const action = lbl.dataset.action;
+      const seg = menu.querySelector(`.cgm-pie-seg[data-action="${action}"]`);
+      lbl.addEventListener("mouseenter", () => seg?.classList.add("cgm-pie-seg-hover"));
+      lbl.addEventListener("mouseleave", () => seg?.classList.remove("cgm-pie-seg-hover"));
+    });
+
+    const closeHandler = (e) => {
+      if (!menu.contains(e.target) && e.target !== btnEl) {
+        this._hideGMGroupRollMenu();
+        document.removeEventListener("click", closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeHandler), 10);
+  }
+
+  _hideGMGroupRollMenu() {
+    if (this._gmGroupRollMenuEl) {
+      this._cleanupGMGroupRollDrag?.();
+      this._cleanupGMGroupRollDrag = null;
+      this._removeAllGMGroupRollLines();
+      this._gmGroupRollMenuEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollMenuEl?.remove(); this._gmGroupRollMenuEl = null; }, 200);
+    }
+  }
+
+  _showGMGroupRollAttributes(btnEl) {
+    this._hideGMGroupRollAttributes();
+    const items = [
+      { key: "might", label: "Might", icon: "fa-hand-fist", color: "#e74c3c" },
+      { key: "speed", label: "Speed", icon: "fa-bolt", color: "#f1c40f" },
+      { key: "intellect", label: "Intellect", icon: "fa-brain", color: "#9b59b6" },
+    ];
+    this._buildGMGroupSubMenu(btnEl, items, "attributes", (key) => {
+      this._sendGroupRollRequest("attribute", key);
+    });
+  }
+
+  _hideGMGroupRollAttributes() {
+    if (this._gmGroupRollAttributesEl) {
+      this._cleanupGMGroupRollAttributesDrag?.();
+      this._cleanupGMGroupRollAttributesDrag = null;
+      this._removeGMGroupRollLine("cgm-gmroll-line-attributes");
+      this._gmGroupRollAttributesEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollAttributesEl?.remove(); this._gmGroupRollAttributesEl = null; }, 200);
+    }
+  }
+
+  _showGMGroupRollSkills(btnEl) {
+    this._hideGMGroupRollSkills();
+    const items = [
+      { key: "perception", label: "Perception", icon: "fa-eye", color: "#3498db" },
+      { key: "investigation", label: "Investigation", icon: "fa-magnifying-glass", color: "#2980b9" },
+      { key: "stealth", label: "Stealth", icon: "fa-mask", color: "#2c3e50" },
+      { key: "persuasion", label: "Persuasion", icon: "fa-comments", color: "#e67e22" },
+      { key: "athletics", label: "Athletics", icon: "fa-person-running", color: "#27ae60" },
+    ];
+    this._buildGMGroupSubMenu(btnEl, items, "skills", (key) => {
+      this._sendGroupRollRequest("skill", key);
+    });
+  }
+
+  _hideGMGroupRollSkills() {
+    if (this._gmGroupRollSkillsEl) {
+      this._cleanupGMGroupRollSkillsDrag?.();
+      this._cleanupGMGroupRollSkillsDrag = null;
+      this._removeGMGroupRollLine("cgm-gmroll-line-skills");
+      this._gmGroupRollSkillsEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollSkillsEl?.remove(); this._gmGroupRollSkillsEl = null; }, 200);
+    }
+  }
+
+  _showGMGroupRollFree(btnEl) {
+    this._hideGMGroupRollFree();
+    const items = [
+      { key: "d20", label: "d20", icon: "fa-dice-d20", color: "#e74c3c" },
+      { key: "d100", label: "d100", icon: "fa-dice", color: "#9b59b6" },
+      { key: "d6", label: "d6", icon: "fa-dice-one", color: "#3498db" },
+    ];
+    this._buildGMGroupSubMenu(btnEl, items, "free", (key) => {
+      this._sendGroupRollRequest("free", key);
+    });
+  }
+
+  _hideGMGroupRollFree() {
+    if (this._gmGroupRollFreeEl) {
+      this._cleanupGMGroupRollFreeDrag?.();
+      this._cleanupGMGroupRollFreeDrag = null;
+      this._removeGMGroupRollLine("cgm-gmroll-line-free");
+      this._gmGroupRollFreeEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollFreeEl?.remove(); this._gmGroupRollFreeEl = null; }, 200);
+    }
+  }
+
+  _showGMGroupRollDefense(btnEl) {
+    this._hideGMGroupRollDefense();
+    const items = [
+      { key: "might", label: "Might Defense", icon: "fa-shield-halved", color: "#e74c3c" },
+      { key: "speed", label: "Speed Defense", icon: "fa-shield-halved", color: "#f1c40f" },
+      { key: "intellect", label: "Intellect Defense", icon: "fa-shield-halved", color: "#9b59b6" },
+    ];
+    this._buildGMGroupSubMenu(btnEl, items, "defense", (key) => {
+      this._sendGroupRollRequest("defense", key);
+    });
+  }
+
+  _hideGMGroupRollDefense() {
+    if (this._gmGroupRollDefenseEl) {
+      this._cleanupGMGroupRollDefenseDrag?.();
+      this._cleanupGMGroupRollDefenseDrag = null;
+      this._removeGMGroupRollLine("cgm-gmroll-line-defense");
+      this._gmGroupRollDefenseEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollDefenseEl?.remove(); this._gmGroupRollDefenseEl = null; }, 200);
+    }
+  }
+
+  _buildGMGroupSubMenu(btnEl, items, type, onSelect) {
+    const size = 140;
+    const half = size / 2;
+    const outerR = half - 6;
+    const innerR = outerR * 0.38;
+    const gap = 2;
+    const segCount = items.length;
+
+    let svgPaths = "";
+    items.forEach((item, i) => {
+      const startAngle = i * (360 / segCount) + gap / 2;
+      const endAngle = (i + 1) * (360 / segCount) - gap / 2;
+      const d = this._pieWedgePath(startAngle, endAngle, innerR, outerR);
+      svgPaths += `<path class="cgm-pie-seg" data-key="${item.key}" d="${d}" />`;
+    });
+
+    let labelsHtml = "";
+    items.forEach((item, i) => {
+      const midAngle = (i * (360 / segCount) + ((i + 1) * (360 / segCount))) / 2;
+      const rad = (midAngle - 90) * Math.PI / 180;
+      const labelR = (innerR + outerR) / 2;
+      const lx = Math.cos(rad) * labelR + half;
+      const ly = Math.sin(rad) * labelR + half;
+      // Split multi-word labels into stacked lines
+      const words = item.label.split(" ");
+      const labelText = words.length > 1 
+        ? words.map(w => `<span class="cgm-gmroll-sub-word">${w}</span>`).join("") 
+        : `<span class="cgm-gmroll-sub-word">${item.label}</span>`;
+      labelsHtml += `
+        <div class="cgm-pie-label cgm-gmroll-sub-label" data-key="${item.key}" style="left:${lx.toFixed(1)}px;top:${ly.toFixed(1)}px;">
+          <i class="fas ${item.icon}"></i>
+          <span class="cgm-gmroll-sub-text">${labelText}</span>
+        </div>
+      `;
+    });
+
+    const menu = document.createElement("div");
+    menu.className = "cgm-radial-menu";
+    menu.style.width = `${size}px`;
+    menu.style.height = `${size}px`;
+
+    // Position — check saved position first
+    const savedPos = this._loadMenuPosition(`gmGroupRoll_${type}`);
+    if (savedPos) {
+      menu.style.left = `${Math.max(0, Math.min(savedPos.left, window.innerWidth - size))}px`;
+      menu.style.top = `${Math.max(0, Math.min(savedPos.top, window.innerHeight - size))}px`;
+    } else {
+      const rect = btnEl.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) {
+        console.warn("Cypher GM Taskbar: GM Group Roll sub button rect is empty");
+        return;
+      }
+      const btnCx = rect.left + rect.width / 2;
+      const btnCy = rect.top + rect.height / 2;
+      const spaceAbove = btnCy - size / 2;
+      const spaceBelow = window.innerHeight - btnCy - size / 2;
+      let menuLeft = btnCx - half;
+      let menuTop;
+      if (spaceAbove >= size + 10 && spaceAbove >= spaceBelow) {
+        menuTop = rect.top - size - 10;
+      } else if (spaceBelow >= size + 10) {
+        menuTop = rect.bottom + 10;
+      } else if (spaceAbove >= size + 10) {
+        menuTop = rect.top - size - 10;
+      } else {
+        menuTop = (window.innerHeight - size) / 2;
+      }
+      menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - size - 8));
+      menuTop = Math.max(8, Math.min(menuTop, window.innerHeight - size - 8));
+      menu.style.left = `${menuLeft}px`;
+      menu.style.top = `${menuTop}px`;
+    }
+
+    menu.innerHTML = `
+      <svg class="cgm-pie-svg" viewBox="-${half} -${half} ${size} ${size}" width="${size}" height="${size}">
+        <defs>
+          <radialGradient id="cgm-pie-bg" cx="0" cy="0" r="${outerR}">
+            <stop offset="0%" stop-color="rgba(20,22,35,0.3)" />
+            <stop offset="100%" stop-color="rgba(15,17,30,0.95)" />
+          </radialGradient>
+        </defs>
+        <circle cx="0" cy="0" r="${outerR}" fill="url(#cgm-pie-bg)" stroke="rgba(200,169,110,0.15)" stroke-width="1" />
+        ${svgPaths}
+        <circle cx="0" cy="0" r="${innerR - 2}" fill="rgba(15,17,30,0.98)" stroke="rgba(200,169,110,0.3)" stroke-width="1.5" />
+      </svg>
+      ${labelsHtml}
+      <div class="cgm-gmroll-back" data-action="backToMain" title="Back to main menu">
+        <i class="fas fa-arrow-left"></i>
+      </div>
+    `;
+
+    document.body.appendChild(menu);
+    const propName = `_gmGroupRoll${type.charAt(0).toUpperCase() + type.slice(1)}El`;
+    this[propName] = menu;
+    requestAnimationFrame(() => menu.classList.add("cgm-radial-visible"));
+
+    // Draw line from main menu to submenu
+    const mainMenu = this._gmGroupRollMenuEl;
+    if (mainMenu) {
+      const mainRect = mainMenu.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      this._createGMGroupRollLine(`cgm-gmroll-line-${type}`, mainRect.left + mainRect.width / 2, mainRect.top + mainRect.height / 2, menuRect.left + menuRect.width / 2, menuRect.top + menuRect.height / 2);
+    }
+
+    // Make draggable
+    const cleanupDrag = this._makeMenuDraggable(menu, `gmGroupRoll_${type}`);
+    const cleanupProp = `_cleanupGMGroupRoll${type.charAt(0).toUpperCase() + type.slice(1)}Drag`;
+    this[cleanupProp] = cleanupDrag;
+
+    // Back arrow click
+    const backBtn = menu.querySelector(".cgm-gmroll-back");
+    if (backBtn) {
+      backBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this[`_hideGMGroupRoll${type.charAt(0).toUpperCase() + type.slice(1)}`]();
+        this._showGMGroupRollMenu(btnEl);
+      });
+    }
+
+    const segs = menu.querySelectorAll(".cgm-pie-seg");
+    const lbls = menu.querySelectorAll(".cgm-pie-label");
+
+    // Click handlers
+    const onItemClick = (e) => {
+      e.stopPropagation();
+      const key = e.currentTarget.dataset.key;
+      this[`_hideGMGroupRoll${type.charAt(0).toUpperCase() + type.slice(1)}`]();
+      this._hideGMGroupRollMenu(); // Close main menu too
+      if (key) onSelect(key);
+    };
+    segs.forEach(seg => seg.addEventListener("click", onItemClick));
+    lbls.forEach(lbl => lbl.addEventListener("click", onItemClick));
+
+    // Hover sync — same as portrait menu
+    segs.forEach(seg => {
+      const key = seg.dataset.key;
+      const label = menu.querySelector(`.cgm-pie-label[data-key="${key}"]`);
+      seg.addEventListener("mouseenter", () => label?.classList.add("cgm-pie-label-active"));
+      seg.addEventListener("mouseleave", () => label?.classList.remove("cgm-pie-label-active"));
+    });
+    lbls.forEach(lbl => {
+      const key = lbl.dataset.key;
+      const seg = menu.querySelector(`.cgm-pie-seg[data-key="${key}"]`);
+      lbl.addEventListener("mouseenter", () => seg?.classList.add("cgm-pie-seg-hover"));
+      lbl.addEventListener("mouseleave", () => seg?.classList.remove("cgm-pie-seg-hover"));
+    });
+
+    const closeHandler = (e) => {
+      if (!menu.contains(e.target) && !this._gmGroupRollMenuEl?.contains(e.target) && e.target !== btnEl) {
+        this[`_hideGMGroupRoll${type.charAt(0).toUpperCase() + type.slice(1)}`]();
+        this._hideGMGroupRollMenu(); // Close main menu too
+        document.removeEventListener("click", closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeHandler), 10);
+  }
+
+  _sendGroupRollRequest(type, subtype) {
+    const pcs = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
+    const names = pcs.map(a => a.name).join(", ");
+    const typeLabels = {
+      attribute: { might: "Might", speed: "Speed", intellect: "Intellect" },
+      skill: { perception: "Perception", investigation: "Investigation", stealth: "Stealth", persuasion: "Persuasion", athletics: "Athletics" },
+      free: { d20: "d20", d100: "d100", d6: "d6" },
+      defense: { might: "Might Defense", speed: "Speed Defense", intellect: "Intellect Defense" },
+    };
+    const label = typeLabels[type]?.[subtype] || subtype;
+    ui.notifications.info(`<b>GM Group Roll Request</b>: ${label}<br>Requested from: ${names || "No players connected"}`);
+
+    // Send socket message to all players
+    if (game.socket) {
+      game.socket.emit("module.cypher-gm-taskbar", {
+        action: "groupRollRequest",
+        type,
+        subtype,
+        difficulty: this._globalDifficulty,
+        gmId: game.user.id,
+      });
+    }
+  }
+
+  /* ─── GM Group Roll Lines ─── */
+
+  _createGMGroupRollLine(id, x1, y1, x2, y2) {
+    let svg = document.getElementById(id);
+    if (!svg) {
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.id = id;
+      svg.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:150;";
+      document.body.appendChild(svg);
+    }
+    svg.innerHTML = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="rgba(200,169,110,0.5)" stroke-width="2" stroke-dasharray="4,3" />`;
+  }
+
+  _removeGMGroupRollLine(id) {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  }
+
+  _removeAllGMGroupRollLines() {
+    ["cgm-gmroll-line-main", "cgm-gmroll-line-attributes", "cgm-gmroll-line-skills", "cgm-gmroll-line-free", "cgm-gmroll-line-defense"].forEach(id => this._removeGMGroupRollLine(id));
+  }
+
+  /* ─── Menu Drag & Drop ─── */
+
+  _loadMenuPosition(key) {
+    try {
+      const raw = game.settings.get(MODULE_ID, "menuPositions");
+      const data = JSON.parse(raw || "{}");
+      return data[key] || null;
+    } catch {
+      return null;
+    }
+  }
+
+  _saveMenuPosition(key, left, top) {
+    try {
+      const raw = game.settings.get(MODULE_ID, "menuPositions");
+      const data = JSON.parse(raw || "{}");
+      data[key] = { left, top };
+      game.settings.set(MODULE_ID, "menuPositions", JSON.stringify(data)).catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
+
+  _makeMenuDraggable(menu, settingKey) {
+    let isDragging = false;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    let hasMoved = false;
+
+    const onPointerDown = (e) => {
+      // Don't drag if clicking on interactive elements (segments, labels, back arrow, or adjuster buttons)
+      if (e.target.closest(".cgm-pie-seg, .cgm-pie-label, .cgm-gmroll-back, .cgm-pools-adj-btn, .cgm-gstatus-confirm-btn")) return;
+      isDragging = true;
+      hasMoved = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = parseFloat(menu.style.left) || 0;
+      startTop = parseFloat(menu.style.top) || 0;
+      menu.classList.add("cgm-menu-dragging");
+      menu.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) hasMoved = true;
+      menu.style.left = `${Math.max(0, Math.min(startLeft + dx, window.innerWidth - menu.offsetWidth))}px`;
+      menu.style.top = `${Math.max(0, Math.min(startTop + dy, window.innerHeight - menu.offsetHeight))}px`;
+    };
+
+    const onPointerUp = (e) => {
+      if (!isDragging) return;
+      isDragging = false;
+      menu.classList.remove("cgm-menu-dragging");
+      menu.releasePointerCapture?.(e.pointerId);
+      if (hasMoved) {
+        this._saveMenuPosition(settingKey, parseFloat(menu.style.left), parseFloat(menu.style.top));
+      }
+    };
+
+    menu.addEventListener("pointerdown", onPointerDown);
+    menu.addEventListener("pointermove", onPointerMove);
+    menu.addEventListener("pointerup", onPointerUp);
+    menu.addEventListener("pointercancel", onPointerUp);
+
+    // Return cleanup function
+    return () => {
+      menu.removeEventListener("pointerdown", onPointerDown);
+      menu.removeEventListener("pointermove", onPointerMove);
+      menu.removeEventListener("pointerup", onPointerUp);
+      menu.removeEventListener("pointercancel", onPointerUp);
+    };
   }
 
   /* ─── Pools Submenu ─── */
@@ -4640,6 +5202,16 @@ ${paths}  </svg>
       this.render();
     });
 
+    // GM Group Roll button
+    this.element.querySelector('[data-action="openGMGroupRoll"]')?.addEventListener("click", (e) => {
+      this._showGMGroupRollMenu(e.currentTarget);
+    });
+
+    // Group Statuses button
+    this.element.querySelector('[data-action="openGroupStatuses"]')?.addEventListener("click", (e) => {
+      this._groupStatuses.toggle(e.currentTarget);
+    });
+
     // Scene Control button
     this.element.querySelector('[data-action="openSceneControl"]')?.addEventListener("click", () => {
       if (!window.cypherSceneControl) {
@@ -5376,6 +5948,7 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "disconnectionSoundVolume", { name: "Sound Volume", hint: "Volume of the disconnection sound (0-100).", scope: "world", config: true, type: Number, default: 50, range: { min: 0, max: 100, step: 5 } });
   game.settings.register(MODULE_ID, "disconnectionSoundTarget", { name: "Sound Target", hint: "Who should hear the disconnection sound.", scope: "world", config: true, type: String, default: "gm", choices: { gm: "GM Only", all: "All Players", disconnected: "Disconnected Player Only" } });
   game.settings.register(MODULE_ID, "npcCanvasData", { name: "NPC Canvas Data", hint: "Stores NPC canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
+  game.settings.register(MODULE_ID, "menuPositions", { name: "Menu Positions", hint: "Saved positions for draggable radial menus (JSON).", scope: "client", config: false, type: String, default: "{}" });
 }
 
 /* ═══════════════════════════════════════════════════════════════
