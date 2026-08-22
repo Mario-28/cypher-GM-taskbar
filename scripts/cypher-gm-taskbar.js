@@ -1,5 +1,5 @@
 /**
- * Cypher GM Taskbar v3.25.0
+ * Cypher GM Taskbar v4.5.3
  * Foundry VTT v13+ | Cypher System
  *
  * GM-only taskbar with combat tracker, intrusions, cyphers, recovery,
@@ -34,6 +34,9 @@ class GMTaskbar {
     this._portraitNameSize = 12;
     this._portraitNameColor = "";
     this._portraitNameOffset = 0;
+    this._portraitBgColor = "#000000";
+    this._portraitBgOpacity = 30;
+    this._portraitBgShape = "trapezoid";
     this._xpCircleSize = 16;
     this._xpCircleOffsetX = 0;
     this._xpCircleOffsetY = 4;
@@ -50,8 +53,9 @@ class GMTaskbar {
     this._notesPanelEl = null;
     // Section settings (extensible for multiple sections)
     this._sections = [
-      { id: "section1", name: "SECTION 1", width: 10, bgColor: "#ffffff", bgOpacity: 30 },
-      { id: "section2", name: "SECTION 2", width: 10, bgColor: "#ffffff", bgOpacity: 30 }
+      { id: "section1", name: "SECTION 1", width: 10, bgColor: "#ffffff", bgOpacity: 30, labelColor: "" },
+      { id: "section2", name: "SECTION 2", width: 10, bgColor: "#ffffff", bgOpacity: 30, labelColor: "" },
+      { id: "section3", name: "SECTION 3", width: 10, bgColor: "#ffffff", bgOpacity: 30, labelColor: "" }
     ];
     this._notesPanelPos = null;
     this._portraitVisibilityMode = this._gs("portraitVisibilityMode", "all");
@@ -75,6 +79,7 @@ class GMTaskbar {
     this._damageSubMenuEl = null;
     this._recoverySubMenuEl = null;
     this._cyphersSubMenuEl = null;
+    this._effectsPickerEl = null;
     this._gmGroupRollMenuEl = null;
     this._gmGroupRollAttributesEl = null;
     this._gmGroupRollSkillsEl = null;
@@ -83,6 +88,7 @@ class GMTaskbar {
     this._groupStatuses = new GroupStatusesMenu(this);
     this._subMenuPositions = {};
     this._lastDifficulty = 0;
+    this._dynamicButtons = []; // Discovered injected buttons from other modules
     this._loadSettings();
     this._loadActorNotes();
     this._loadPanelPositions();
@@ -127,11 +133,64 @@ class GMTaskbar {
   }
 
   _gs(key, fallback = null) {
-    try { return game.settings.get(MODULE_ID, key); } catch { return fallback; }
+    try {
+      // Use per-user synced settings (world scope, keyed by user ID)
+      const userData = game.settings.get(MODULE_ID, "userSettings") || {};
+      const userId = game.user?.id || "default";
+      if (userData[userId] && key in userData[userId]) return userData[userId][key];
+      // Fallback: try old client-scoped setting for migration
+      try { return game.settings.get(MODULE_ID, key); } catch {}
+      return fallback;
+    } catch { return fallback; }
   }
 
   async _ss(key, value) {
-    try { await game.settings.set(MODULE_ID, key, value); } catch (e) { console.warn(`${MODULE_ID} | Failed to save setting "${key}":`, e); }
+    try {
+      const userId = game.user?.id || "default";
+      const userData = game.settings.get(MODULE_ID, "userSettings") || {};
+      if (!userData[userId]) userData[userId] = {};
+      userData[userId][key] = value;
+      await game.settings.set(MODULE_ID, "userSettings", userData);
+    } catch (e) { console.warn(`${MODULE_ID} | Failed to save setting "${key}":`, e); }
+  }
+
+  /* Migrate old client-scoped settings to per-user synced settings */
+  async _migrateSettings() {
+    const userId = game.user?.id || "default";
+    const userData = game.settings.get(MODULE_ID, "userSettings") || {};
+    if (userData[userId]?._migrated) return; // Already migrated
+
+    const oldKeys = [
+      "dock", "opacity", "compact", "locked", "portraitPosition", "portraitSize",
+      "portraitObjectFit", "portraitNameAbove", "portraitBarOffset", "portraitBarWidth",
+      "portraitBorderColor", "portraitBorderWidth", "portraitShape", "portraitNameSize",
+      "portraitNameColor", "portraitNameOffset", "portraitBgColor", "portraitBgOpacity", "portraitBgShape",
+      "xpCircleSize", "xpCircleOffsetX",
+      "xpCircleOffsetY", "radialMenuSize", "radialMenuOffset", "sectionWidth", "sectionBgColor",
+      "sectionBgOpacity", "sectionPosition", "section2Width", "section2BgColor",
+      "section2BgOpacity", "section2Position", "section3Width", "section3BgColor",
+      "section3BgOpacity", "section3Position", "sectionsUnlocked", "buttonLayout",
+      "globalDifficulty", "portraitVisibilityMode", "notes", "sectionLabelSize", "sectionLabelColor", "sectionLabelOffset", "sectionNames",
+      "section1LabelColor", "section2LabelColor", "section3LabelColor"
+    ];
+
+    let migrated = false;
+    for (const key of oldKeys) {
+      try {
+        const oldVal = game.settings.get(MODULE_ID, key);
+        if (oldVal !== undefined && oldVal !== null) {
+          if (!userData[userId]) userData[userId] = {};
+          userData[userId][key] = oldVal;
+          migrated = true;
+        }
+      } catch { /* old setting didn't exist */ }
+    }
+
+    if (migrated) {
+      userData[userId]._migrated = true;
+      await game.settings.set(MODULE_ID, "userSettings", userData);
+      console.log(`${MODULE_ID} | Migrated client settings to per-user synced settings for user ${userId}`);
+    }
   }
 
   _loadSettings() {
@@ -153,6 +212,9 @@ class GMTaskbar {
     this._portraitNameSize = this._gs("portraitNameSize", 12);
     this._portraitNameColor = this._gs("portraitNameColor", "");
     this._portraitNameOffset = this._gs("portraitNameOffset", 0);
+    this._portraitBgColor = this._gs("portraitBgColor", "#000000");
+    this._portraitBgOpacity = this._gs("portraitBgOpacity", 30);
+    this._portraitBgShape = this._gs("portraitBgShape", "trapezoid");
     this._xpCircleSize = this._gs("xpCircleSize", 16);
     this._xpCircleOffsetX = this._gs("xpCircleOffsetX", 0);
     this._xpCircleOffsetY = this._gs("xpCircleOffsetY", 4);
@@ -168,6 +230,30 @@ class GMTaskbar {
     this._sections[1].bgColor = this._gs("section2BgColor", "#ffffff");
     this._sections[1].bgOpacity = this._gs("section2BgOpacity", 30);
     this._sections[1].position = this._gs("section2Position", 0);
+    // Load SECTION 3 settings
+    this._sections[2].width = this._gs("section3Width", 10);
+    this._sections[2].bgColor = this._gs("section3BgColor", "#ffffff");
+    this._sections[2].bgOpacity = this._gs("section3BgOpacity", 30);
+    this._sections[2].position = this._gs("section3Position", 0);
+    // Load section label settings
+    this._sectionLabelSize = this._gs("sectionLabelSize", 10);
+    this._sectionLabelColor = this._gs("sectionLabelColor", "#c8a96e");
+    this._sectionLabelOffset = this._gs("sectionLabelOffset", -8);
+    // Load individual section label colors (fallback to global)
+    this._sections[0].labelColor = this._gs("section1LabelColor", "");
+    this._sections[1].labelColor = this._gs("section2LabelColor", "");
+    this._sections[2].labelColor = this._gs("section3LabelColor", "");
+    // Load section names (custom labels)
+    this._sectionNames = this._gs("sectionNames", ["SECTION 1", "SECTION 2", "SECTION 3"]);
+    if (!Array.isArray(this._sectionNames) || this._sectionNames.length < 3) {
+      this._sectionNames = ["SECTION 1", "SECTION 2", "SECTION 3"];
+    }
+    // Apply custom names to section objects
+    this._sections.forEach((sec, i) => { sec.name = this._sectionNames[i] || sec.name; });
+    // Load unlock setting
+    this._sectionsUnlocked = this._gs("sectionsUnlocked", false);
+    // Load button layout config
+    this._buttonLayout = this._gs("buttonLayout", null);
     this._settingsTab = "general";
   }
 
@@ -176,6 +262,7 @@ class GMTaskbar {
   render() {
     document.querySelector(`#${MODULE_ID}-bar`)?.remove();
     document.querySelector(`.cgm-panel`)?.remove();
+    document.querySelector(`.cgm-portraits-bg-wrap`)?.remove();
     if (this._connInterval) clearInterval(this._connInterval);
     if (this._playerMonitorInterval) clearInterval(this._playerMonitorInterval);
     if (this._autoHideTimer) clearTimeout(this._autoHideTimer);
@@ -189,12 +276,38 @@ class GMTaskbar {
     document.body.appendChild(bar);
     this.element = bar;
 
+    // Create portrait background panel as separate element (behind bar)
+    this._createPortraitBg();
+
     this._applySettings();
     this._bindEvents();
     this._bindPortraitEvents();
     this._startConnectionMonitor();
     this._startPlayerMonitor();
     this._setupAutoHide();
+
+    // Sync portrait background width to match float (after DOM is ready)
+    this._syncPortraitBgWidth();
+
+    // Discover buttons injected by other modules
+    // Clear stale references before re-discovering
+    this._dynamicButtons = [];
+
+    // Phase 1: Immediate — catch already-injected buttons
+    this._discoverDynamicButtons();
+
+    // Phase 2: After external modules inject (in their requestAnimationFrame),
+    // discover again and move buttons to correct positions per saved layout
+    setTimeout(() => {
+      this._discoverDynamicButtons();
+      this._correctDynamicButtonPositions();
+    }, 0);
+
+    // Phase 3: Fallback for late injectors
+    setTimeout(() => {
+      this._discoverDynamicButtons();
+      this._correctDynamicButtonPositions();
+    }, 500);
 
     if (this.activePanel) this._openPanel(this.activePanel);
   }
@@ -211,6 +324,192 @@ class GMTaskbar {
     box.title = 'Global Difficulty (TN ' + (this._globalDifficulty * 3) + ')';
   }
 
+  /* ─── Button Definitions ─── */
+  _getButtonDefs() {
+    const staticBtns = [
+      { id: "gmroll", action: "openGMGroupRoll", icon: "fa-dice-d20", color: "#d94040", title: "GM Group Roll Request", defaultSection: 0 },
+      { id: "groupstatus", action: "openGroupStatuses", icon: "fa-droplet", color: "#9b59b6", title: "Group Statuses", defaultSection: 0 },
+      { id: "quickscene", action: "openQuickScene", icon: "fa-dice-d20", color: "", title: "Quick Scene", defaultSection: 0 },
+      { id: "cypherlog", action: "openCypherLog", icon: "fa-book-open", color: "", title: "Cypher Log", defaultSection: 1, requiresModule: "cypher-log" },
+      { id: "scene", action: "openSceneControl", icon: "fa-map", color: "", title: "Scene Control", defaultSection: 1 },
+      { id: "npc", action: "openNPCCanvas", icon: "fa-users", color: "", title: "NPC Canvas", defaultSection: 1 },
+    ];
+    // Merge with dynamically discovered buttons (injected by other modules)
+    return [...staticBtns, ...this._dynamicButtons];
+  }
+
+  /* ─── Generate a stable ID for an injected button ─── */
+  _getStableButtonId(btn) {
+    // Already has an ID — use it
+    if (btn.dataset.btnId) return btn.dataset.btnId;
+
+    // Use data-action (most stable — Name Generator uses this)
+    const action = btn.dataset.action;
+    if (action) return action;
+
+    // Generate from title (Cypher Log, etc.)
+    const title = btn.title || btn.textContent?.trim() || '';
+    if (title) {
+      const slug = title.toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+      if (slug) return `injected-${slug}`;
+    }
+
+    // Last resort: index-based (not stable across renders)
+    return null;
+  }
+
+  /* ─── Discover buttons injected by other modules ─── */
+  _discoverDynamicButtons() {
+    const bar = document.querySelector(`#${MODULE_ID}-bar`);
+    if (!bar) return;
+
+    // Only skip our built-in static buttons — injected buttons must be re-discovered
+    // after every render since their DOM elements (and event listeners) are destroyed
+    const staticIds = new Set(["gmroll", "groupstatus", "quickscene", "cypherlog", "scene", "npc"]);
+    const dynamic = [];
+    const sections = bar.querySelectorAll('.cgm-custom-section');
+
+    bar.querySelectorAll('.cgm-section-btn').forEach((btn, idx) => {
+      let btnId = btn.dataset.btnId;
+      // If button has no ID, generate a stable one from its attributes
+      if (!btnId) {
+        const idFromClass = [...btn.classList].find(c => c.startsWith('cgm-section-btn-') && c !== 'cgm-section-btn');
+        btnId = idFromClass?.replace('cgm-section-btn-', '') || this._getStableButtonId(btn) || `injected-${idx}`;
+        btn.dataset.btnId = btnId; // Assign it so we can track it
+      }
+      // Skip only our built-in static buttons (injected ones must be re-discovered)
+      if (staticIds.has(btnId)) return;
+
+      const iconEl = btn.querySelector('i');
+      const iconClass = iconEl ? [...iconEl.classList].find(c => c.startsWith('fa-')) : 'fa-circle';
+      const action = btn.dataset.action || '';
+      const title = btn.title || btn.textContent?.trim() || 'Unknown';
+      const sectionEl = btn.closest('.cgm-custom-section');
+      let sectionIdx = 1;
+      if (sectionEl) {
+        sectionIdx = [...sections].indexOf(sectionEl);
+        if (sectionIdx < 0) sectionIdx = 1;
+      }
+
+      // ALWAYS track the button so _getButtonDefs() can find it later
+      // (even if drag handlers were already set up by _setupSectionDragAndDrop)
+      dynamic.push({
+        id: btnId,
+        action: action,
+        icon: iconClass,
+        color: "",
+        title: title,
+        defaultSection: sectionIdx,
+        isDynamic: true
+      });
+
+      // Only add event listeners if not already set up
+      // (_setupSectionDragAndDrop may have already handled this button)
+      if (this._sectionsUnlocked && btn.dataset.cgmDragSetup !== "true") {
+        btn.draggable = true;
+        btn.classList.add('cgm-section-btn-unlocked');
+        btn.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this._showIconCustomizer(btnId);
+        });
+        btn.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/plain', btnId);
+          e.dataTransfer.effectAllowed = 'move';
+          btn.classList.add('cgm-dragging');
+        });
+        btn.addEventListener('dragend', () => {
+          btn.classList.remove('cgm-dragging');
+          sections.forEach(sec => sec.classList.remove('cgm-drag-over'));
+        });
+        btn.dataset.cgmDragSetup = "true";
+      }
+    });
+
+    this._dynamicButtons = dynamic;
+  }
+
+  /* ─── Move injected buttons to their correct sections per saved layout ─── */
+  _correctDynamicButtonPositions() {
+    const bar = document.querySelector(`#${MODULE_ID}-bar`);
+    if (!bar) return;
+
+    const layout = this._getButtonLayout();
+    const sections = bar.querySelectorAll('.cgm-custom-section');
+
+    // For each dynamic button with a saved position, ensure it's in the right section
+    this._dynamicButtons.forEach(btnDef => {
+      const cfg = layout[btnDef.id];
+      if (!cfg) return;
+
+      const targetSection = cfg.section ?? btnDef.defaultSection;
+      const btnEl = bar.querySelector(`.cgm-section-btn[data-btn-id="${btnDef.id}"]`);
+      if (!btnEl) return;
+
+      const currentSection = btnEl.closest('.cgm-custom-section');
+      const currentIdx = currentSection ? [...sections].indexOf(currentSection) : -1;
+
+      // If button is in the wrong section, move it
+      if (currentIdx !== targetSection && sections[targetSection]) {
+        const targetContent = sections[targetSection].querySelector('.cgm-section-buttons');
+        if (targetContent) {
+          targetContent.appendChild(btnEl);
+        }
+      }
+    });
+  }
+
+  /* ─── Get button layout (section assignment) ─── */
+  _getButtonLayout() {
+    // Always merge saved data with current button definitions
+    // This ensures newly active modules (cypher-log, etc.) get entries
+    const layout = {};
+    this._getButtonDefs().forEach(btn => {
+      const saved = this._buttonLayout?.[btn.id] || {};
+      layout[btn.id] = {
+        section: saved.section ?? btn.defaultSection,
+        size: saved.size ?? 16,
+        color: saved.color ?? btn.color ?? "",
+        hidden: saved.hidden ?? false
+      };
+    });
+    return layout;
+  }
+
+  /* ─── Build buttons HTML for a section ─── */
+  _buildSectionButtonsHTML(sectionIndex) {
+    const layout = this._getButtonLayout();
+    const buttons = this._getButtonDefs().filter(btn => {
+      if (btn.requiresModule && !game.modules?.get(btn.requiresModule)?.active) return false;
+      // Skip dynamically injected buttons — external modules render those themselves
+      if (btn.isDynamic) return false;
+      const cfg = layout[btn.id];
+      // hidden = not shown; null/undefined = use default
+      if (cfg && cfg.hidden === true) return false;
+      const sec = cfg?.section ?? btn.defaultSection;
+      return sec === sectionIndex;
+    });
+
+    if (!buttons.length) return "";
+
+    return buttons.map(btn => {
+      const cfg = layout[btn.id] || {};
+      const size = cfg.size || 16;
+      const color = cfg.color || btn.color || "";
+      const colorStyle = color ? `color:${color};` : "";
+      const sizeStyle = `font-size:${size}px;`;
+      const draggable = this._sectionsUnlocked ? 'draggable="true"' : '';
+      const unlockClass = this._sectionsUnlocked ? 'cgm-section-btn-unlocked' : '';
+      return `
+        <button class="cgm-section-btn cgm-section-btn-${btn.id} ${unlockClass}" data-action="${btn.action}" title="${btn.title}" data-btn-id="${btn.id}" ${draggable}>
+          <i class="fas ${btn.icon}" style="${sizeStyle}${colorStyle}"></i>
+        </button>
+      `;
+    }).join("");
+  }
+
   /* ─── HTML Builder ─── */
 
   _buildHTML() {
@@ -219,30 +518,9 @@ class GMTaskbar {
     const lockTitle = this._locked ? "Taskbar locked (visible)" : "Taskbar unlocked (auto-hide)";
     const gd = this._globalDifficulty;
     const tn = gd * 3;
-    const secHTML = this._buildSectionHTML(0, `
-      <button class="cgm-section-btn cgm-section-btn-gmroll" data-action="openGMGroupRoll" title="GM Group Roll Request">
-        <i class="fas fa-dice-d20" style="color:#d94040;"></i>
-      </button>
-      <button class="cgm-section-btn cgm-section-btn-groupstatus" data-action="openGroupStatuses" title="Group Statuses">
-        <i class="fas fa-droplet" style="color:#9b59b6;"></i>
-      </button>
-      <button class="cgm-section-btn cgm-section-btn-quickscene" data-action="openQuickScene" title="Quick Scene">
-        <i class="fas fa-dice-d20"></i>
-      </button>
-    `);
-    const sec2HTML = this._buildSectionHTML(1, `
-      ${game.modules?.get("cypher-log")?.active ? `
-      <button class="cgm-section-btn cgm-section-btn-log cl-gm-taskbar-btn" data-action="openCypherLog" title="Cypher Log">
-        <i class="fa-solid fa-book-open"></i>
-      </button>
-      ` : ""}
-      <button class="cgm-section-btn cgm-section-btn-scene" data-action="openSceneControl" title="Scene Control">
-        <i class="fas fa-map"></i>
-      </button>
-      <button class="cgm-section-btn cgm-section-btn-npc" data-action="openNPCCanvas" title="NPC Canvas">
-        <i class="fas fa-users"></i>
-      </button>
-    `);
+    const secHTML = this._buildSectionHTML(0, this._buildSectionButtonsHTML(0));
+    const sec2HTML = this._buildSectionHTML(1, this._buildSectionButtonsHTML(1));
+    const sec3HTML = this._buildSectionHTML(2, this._buildSectionButtonsHTML(2));
 
     return `
       <!-- Floating player portraits above bar -->
@@ -296,6 +574,9 @@ class GMTaskbar {
         <!-- SECTION 2 -->
         ${sec2HTML}
 
+        <!-- SECTION 3 -->
+        ${sec3HTML}
+
         <div class="cgm-spacer"></div>
 
         <!-- Right side section -->
@@ -332,8 +613,12 @@ class GMTaskbar {
     const bgStyle = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${sec.bgOpacity / 100})` : `rgba(255,255,255,${sec.bgOpacity / 100})`;
     const posOffset = sec.position ?? 0;
     const posStyle = posOffset > 0 ? `margin-left: ${posOffset}px;` : "";
+    const labelSize = this._sectionLabelSize || 10;
+    const labelColor = sec.labelColor || this._sectionLabelColor || "#c8a96e";
+    const labelOffset = this._sectionLabelOffset ?? -8;
     return `
       <div class="cgm-custom-section" title="${sec.name}" style="width: ${sec.width}%; background: ${bgStyle}; ${posStyle}">
+        <div class="cgm-section-label-badge" style="font-size:${labelSize}px;color:${labelColor};top:${labelOffset}px;">${sec.name}</div>
         <div class="cgm-section-separator cgm-sep-left"></div>
         <div class="cgm-section-content">
           <div class="cgm-section-buttons">
@@ -352,6 +637,67 @@ class GMTaskbar {
       g: parseInt(result[2], 16),
       b: parseInt(result[3], 16)
     } : null;
+  }
+
+  /* ─── Hidden Icons HTML for Settings ─── */
+  _buildHiddenIconsHTML() {
+    const layout = this._getButtonLayout();
+    const hiddenButtons = this._getButtonDefs().filter(btn => {
+      if (btn.requiresModule && !game.modules?.get(btn.requiresModule)?.active) return false;
+      return layout[btn.id]?.hidden === true;
+    });
+
+    if (!hiddenButtons.length) return "";
+
+    const items = hiddenButtons.map(btn => `
+      <div class="cgm-hidden-icon-row">
+        <span class="cgm-hidden-icon-name"><i class="fas ${btn.icon}"></i> ${btn.title}</span>
+        <button class="cgm-btn cgm-btn-small" data-action="unhideIcon" data-btn-id="${btn.id}">
+          <i class="fas fa-eye"></i> Unhide
+        </button>
+      </div>
+    `).join("");
+
+    return `
+      <div class="cgm-setting-section-title">HIDDEN ICONS</div>
+      <div class="cgm-hidden-icons-list">
+        ${items}
+      </div>
+    `;
+  }
+
+  /* Sync portrait background width to match float content */
+  _syncPortraitBgWidth() {
+    if (!this.element) return;
+    const float = this.element.querySelector('.cgm-portraits-float');
+    const bgWrap = document.querySelector('.cgm-portraits-bg-wrap');
+    if (float && bgWrap) {
+      bgWrap.style.width = float.offsetWidth + 'px';
+    }
+  }
+
+  /* ─── Portrait Background Panel (separate element behind bar) ─── */
+  _createPortraitBg() {
+    const pcs = this._getPartyData();
+    if (!pcs.length) return;
+    if (this._portraitVisibilityMode === "hide") return;
+
+    const posCls = `cgm-portraits-${this._portraitPosition}`;
+    const wrap = document.createElement('div');
+    wrap.className = `cgm-portraits-bg-wrap ${posCls}`;
+    wrap.dataset.dock = this._dock;
+
+    const bg = document.createElement('div');
+    bg.className = `cgm-portraits-bg cgm-portraits-bg-${this._portraitBgShape}`;
+    bg.dataset.bgShape = this._portraitBgShape;
+    bg.style.backgroundColor = this._portraitBgColor;
+    bg.style.opacity = this._portraitBgOpacity / 100;
+
+    wrap.appendChild(bg);
+    document.body.appendChild(wrap);
+
+    // Sync width after portraits render
+    this._syncPortraitBgWidth();
   }
 
   /* ─── Floating Portraits (above bar, left side) ─── */
@@ -786,6 +1132,7 @@ ${paths}  </svg>
     }
     this._hidePoolsMenu();
     this._hideStatusMenu();
+    this._hideDfredsEffectsPicker();
     this._hideNotesSubMenu();
     this._hideTargetSubMenu();
     this._hideDamageSubMenu();
@@ -1761,7 +2108,7 @@ ${paths}  </svg>
         if (key === "health") {
           this._showHealthSubmenu(actorId, wrapEl, endX, endY);
         } else if (key === "effects") {
-          ui.notifications.info("Active Effects: placeholder (coming soon)");
+          this._showDfredsEffectsPicker(actorId, wrapEl);
         }
       });
     });
@@ -1911,8 +2258,174 @@ ${paths}  </svg>
       this._healthMenuEl.classList.remove("cgm-health-submenu-visible");
       setTimeout(() => { this._healthMenuEl?.remove(); this._healthMenuEl = null; }, 200);
     }
+    this._hideDfredsEffectsPicker();
     this._statusActorId = null;
     this._statusWrapEl = null;
+  }
+
+  /* ─── DFreds Convenient Effects Integration ─── */
+
+  _getDfredsEffects() {
+    const ce = game.modules.get("dfreds-convenient-effects")?.api;
+    if (!ce) return [];
+    try {
+      const effects = ce.findEffects() || [];
+      return effects.map(e => ({
+        id: e.id || e._id,
+        name: e.name,
+        img: e.img || e.icon || "icons/svg/aura.svg",
+        ceId: e.getFlag?.("dfreds-convenient-effects", "ceEffectId") || e.id,
+      })).sort((a, b) => a.name.localeCompare(b.name));
+    } catch (err) {
+      console.warn("Cypher GM Taskbar | Failed to get DFreds effects:", err);
+      return [];
+    }
+  }
+
+  _showDfredsEffectsPicker(actorId, wrapEl) {
+    this._hideDfredsEffectsPicker();
+    this._hideStatusMenu();
+    this._hideRadialMenu();
+
+    const effects = this._getDfredsEffects();
+    if (effects.length === 0) {
+      ui.notifications.warn("DFreds Convenient Effects not found or no effects available.");
+      return;
+    }
+
+    const actor = game.actors.get(actorId);
+    const rect = wrapEl?.getBoundingClientRect();
+    const panelW = 320;
+    const panelH = 420;
+
+    let left = rect ? rect.left + rect.width / 2 - panelW / 2 : (window.innerWidth - panelW) / 2;
+    let top = rect ? rect.top - panelH - 20 : (window.innerHeight - panelH) / 2;
+
+    // Clamp to viewport
+    left = Math.max(10, Math.min(left, window.innerWidth - panelW - 10));
+    top = Math.max(10, Math.min(top, window.innerHeight - panelH - 10));
+
+    const panel = document.createElement("div");
+    panel.className = "cgm-effects-picker";
+    panel.style.cssText = `position:fixed;left:${left}px;top:${top}px;width:${panelW}px;height:${panelH}px;z-index:210;`;
+
+    // Get currently active effect IDs on this actor
+    const activeCeIds = new Set();
+    if (actor) {
+      for (const effect of actor.effects || []) {
+        const ceId = effect.getFlag?.("dfreds-convenient-effects", "ceEffectId");
+        if (ceId) activeCeIds.add(ceId);
+      }
+    }
+
+    const itemsHtml = effects.map(eff => {
+      const isActive = activeCeIds.has(eff.ceId);
+      return `
+        <div class="cgm-effect-item${isActive ? ' cgm-effect-active' : ''}" data-effect-id="${eff.ceId}" data-actor-id="${actorId}">
+          <img src="${eff.img}" alt="" />
+          <span>${this._escapeHTML(eff.name)}</span>
+          ${isActive ? '<div class="cgm-effect-indicator"><i class="fas fa-check"></i></div>' : ''}
+        </div>
+      `;
+    }).join("");
+
+    panel.innerHTML = `
+      <div class="cgm-effects-picker-header">
+        <span><i class="fas fa-sparkles"></i> Effects — ${this._escapeHTML(actor?.name || "Actor")}</span>
+        <button class="cgm-effects-picker-close" title="Close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="cgm-effects-picker-search">
+        <i class="fas fa-search"></i>
+        <input type="text" placeholder="Search effects..." />
+      </div>
+      <div class="cgm-effects-picker-grid">
+        ${itemsHtml}
+      </div>
+      <div class="cgm-effects-picker-footer">
+        <span>${effects.length} effects</span>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    this._effectsPickerEl = panel;
+
+    requestAnimationFrame(() => panel.classList.add("cgm-effects-picker-visible"));
+
+    // Close button
+    panel.querySelector(".cgm-effects-picker-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._hideDfredsEffectsPicker();
+    });
+
+    // Search filter
+    const searchInput = panel.querySelector(".cgm-effects-picker-search input");
+    searchInput?.addEventListener("input", (e) => {
+      const q = e.target.value.toLowerCase();
+      panel.querySelectorAll(".cgm-effect-item").forEach(item => {
+        const name = item.querySelector("span")?.textContent?.toLowerCase() || "";
+        item.style.display = name.includes(q) ? "" : "none";
+      });
+    });
+
+    // Effect click — toggle
+    panel.querySelectorAll(".cgm-effect-item").forEach(item => {
+      item.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const effectId = item.dataset.effectId;
+        const targetActorId = item.dataset.actorId;
+        await this._toggleDfredsEffect(effectId, targetActorId);
+        // Refresh active state visually
+        const targetActor = game.actors.get(targetActorId);
+        const newActive = new Set();
+        if (targetActor) {
+          for (const effect of targetActor.effects || []) {
+            const ceId = effect.getFlag?.("dfreds-convenient-effects", "ceEffectId");
+            if (ceId) newActive.add(ceId);
+          }
+        }
+        const nowActive = newActive.has(effectId);
+        item.classList.toggle("cgm-effect-active", nowActive);
+        const indicator = item.querySelector(".cgm-effect-indicator");
+        if (nowActive && !indicator) {
+          item.insertAdjacentHTML("beforeend", '<div class="cgm-effect-indicator"><i class="fas fa-check"></i></div>');
+        } else if (!nowActive && indicator) {
+          indicator.remove();
+        }
+      });
+    });
+
+    // Outside click to close
+    const closeHandler = (e) => {
+      if (!panel.contains(e.target)) {
+        this._hideDfredsEffectsPicker();
+        document.removeEventListener("click", closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeHandler), 10);
+  }
+
+  _hideDfredsEffectsPicker() {
+    if (this._effectsPickerEl) {
+      this._effectsPickerEl.classList.remove("cgm-effects-picker-visible");
+      setTimeout(() => { this._effectsPickerEl?.remove(); this._effectsPickerEl = null; }, 200);
+    }
+  }
+
+  async _toggleDfredsEffect(effectId, actorId) {
+    const ce = game.modules.get("dfreds-convenient-effects")?.api;
+    if (!ce) {
+      ui.notifications.warn("DFreds Convenient Effects module is not active.");
+      return;
+    }
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    try {
+      await ce.toggleEffect({ effectId, uuids: [actor.uuid] });
+      ui.notifications.info(`Toggled effect on ${actor.name}.`);
+    } catch (err) {
+      console.error("Cypher GM Taskbar | Failed to toggle DFreds effect:", err);
+      ui.notifications.error("Failed to toggle effect. See console for details.");
+    }
   }
 
   /* ═══════════════════════════════════════════════════════════
@@ -4572,6 +5085,16 @@ ${paths}  </svg>
     const float = this.element.querySelector('.cgm-portraits-float');
     if (!float) return;
 
+    // Sync background panel styles (external element)
+    const bg = document.querySelector('.cgm-portraits-bg');
+    if (bg) {
+      bg.style.backgroundColor = this._portraitBgColor;
+      bg.style.opacity = this._portraitBgOpacity / 100;
+      bg.classList.remove('cgm-portraits-bg-trapezoid', 'cgm-portraits-bg-rectangle', 'cgm-portraits-bg-rounded', 'cgm-portraits-bg-none');
+      bg.classList.add(`cgm-portraits-bg-${this._portraitBgShape}`);
+      bg.dataset.bgShape = this._portraitBgShape;
+    }
+
     const pcs = this._getPartyData();
     const wraps = float.querySelectorAll('.cgm-portrait-wrap');
 
@@ -4618,6 +5141,9 @@ ${paths}  </svg>
         img.style.borderColor = borderColor;
       }
     });
+
+    // Sync background width in case portrait count/size changed
+    this._syncPortraitBgWidth();
   }
 
   /* Update baseDifficulty on any open Cypher System roll dialogs */
@@ -4994,6 +5520,29 @@ ${paths}  </svg>
           </div>
         </div>
         <div class="cgm-setting-divider"></div>
+        <div class="cgm-setting-section-title">BACKGROUND PANEL</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Shape</span>
+          <div class="cgm-setting-opts">
+            <button class="cgm-opt-btn ${this._portraitBgShape === 'trapezoid' ? 'cgm-opt-active' : ''}" data-action="setPortraitBgShape" data-shape="trapezoid">Trapezoid</button>
+            <button class="cgm-opt-btn ${this._portraitBgShape === 'rectangle' ? 'cgm-opt-active' : ''}" data-action="setPortraitBgShape" data-shape="rectangle">Rectangle</button>
+            <button class="cgm-opt-btn ${this._portraitBgShape === 'rounded' ? 'cgm-opt-active' : ''}" data-action="setPortraitBgShape" data-shape="rounded">Rounded</button>
+            <button class="cgm-opt-btn ${this._portraitBgShape === 'none' ? 'cgm-opt-active' : ''}" data-action="setPortraitBgShape" data-shape="none">None</button>
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Bg Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setPortraitBgColor" value="${this._portraitBgColor || '#000000'}">
+            <button class="cgm-opt-btn ${!this._portraitBgColor ? 'cgm-opt-active' : ''}" data-action="clearPortraitBgColor">Default</button>
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Bg Opacity</span>
+          <input type="range" min="0" max="100" value="${this._portraitBgOpacity}" class="cgm-slider" data-action="setPortraitBgOpacity">
+          <span class="cgm-slider-val">${this._portraitBgOpacity}%</span>
+        </div>
+        <div class="cgm-setting-divider"></div>
         <div class="cgm-setting-section-title">RADIAL MENU</div>
         <div class="cgm-setting-row">
           <span class="cgm-setting-label">Menu Size</span>
@@ -5034,7 +5583,43 @@ ${paths}  </svg>
 
     const sectionsHTML = `
       <div class="cgm-settings-grid">
-        <div class="cgm-setting-section-title">SECTION 1</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Unlock Sections</span>
+          <button class="cgm-toggle-btn ${this._sectionsUnlocked ? 'cgm-toggle-on' : ''}" data-action="toggleSectionsUnlock" title="Toggle section editing">
+            <i class="fas ${this._sectionsUnlocked ? 'fa-lock-open' : 'fa-lock'}"></i> ${this._sectionsUnlocked ? 'UNLOCKED' : 'LOCKED'}
+          </button>
+        </div>
+        <div class="cgm-setting-hint">When unlocked: drag icons between sections, right-click icons to customize size and color.</div>
+
+        <div class="cgm-setting-section-title">SECTION LABELS</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Size</span>
+          <input type="range" min="6" max="18" value="${this._sectionLabelSize}" class="cgm-slider" data-action="setSectionLabelSize">
+          <span class="cgm-slider-val">${this._sectionLabelSize}px</span>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionLabelColor" value="${this._sectionLabelColor}">
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Offset</span>
+          <input type="range" min="-30" max="30" value="${this._sectionLabelOffset}" class="cgm-slider" data-action="setSectionLabelOffset">
+          <span class="cgm-slider-val">${this._sectionLabelOffset}px</span>
+        </div>
+
+        <div class="cgm-setting-section-title" data-section-name-title="0">${this._sections[0].name}</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Name</span>
+          <input type="text" class="cgm-text-input" data-action="setSectionName" data-section="0" value="${this._sections[0].name}" maxlength="20" style="width:120px;">
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionLabelColor" data-section="0" value="${this._sections[0].labelColor || this._sectionLabelColor || '#c8a96e'}">
+          </div>
+        </div>
         <div class="cgm-setting-row">
           <span class="cgm-setting-label">Position</span>
           <input type="range" min="0" max="200" value="${this._sections[0].position ?? 0}" class="cgm-slider" data-action="setSectionPosition" data-section="0">
@@ -5057,7 +5642,17 @@ ${paths}  </svg>
           <span class="cgm-slider-val">${this._sections[0].bgOpacity}%</span>
         </div>
 
-        <div class="cgm-setting-section-title">SECTION 2</div>
+        <div class="cgm-setting-section-title" data-section-name-title="1">${this._sections[1].name}</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Name</span>
+          <input type="text" class="cgm-text-input" data-action="setSectionName" data-section="1" value="${this._sections[1].name}" maxlength="20" style="width:120px;">
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionLabelColor" data-section="1" value="${this._sections[1].labelColor || this._sectionLabelColor || '#c8a96e'}">
+          </div>
+        </div>
         <div class="cgm-setting-row">
           <span class="cgm-setting-label">Position on Taskbar</span>
           <input type="range" min="0" max="200" value="${this._sections[1].position ?? 0}" class="cgm-slider" data-action="setSectionPosition" data-section="1">
@@ -5079,6 +5674,41 @@ ${paths}  </svg>
           <input type="range" min="0" max="100" value="${this._sections[1].bgOpacity}" class="cgm-slider" data-action="setSectionOpacity" data-section="1">
           <span class="cgm-slider-val">${this._sections[1].bgOpacity}%</span>
         </div>
+
+        <div class="cgm-setting-section-title" data-section-name-title="2">${this._sections[2].name}</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Name</span>
+          <input type="text" class="cgm-text-input" data-action="setSectionName" data-section="2" value="${this._sections[2].name}" maxlength="20" style="width:120px;">
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionLabelColor" data-section="2" value="${this._sections[2].labelColor || this._sectionLabelColor || '#c8a96e'}">
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Position on Taskbar</span>
+          <input type="range" min="0" max="200" value="${this._sections[2].position ?? 0}" class="cgm-slider" data-action="setSectionPosition" data-section="2">
+          <span class="cgm-slider-val">${this._sections[2].position ?? 0}px</span>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Width</span>
+          <input type="range" min="5" max="50" value="${this._sections[2].width}" class="cgm-slider" data-action="setSectionWidth" data-section="2">
+          <span class="cgm-slider-val">${this._sections[2].width}%</span>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Background Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionColor" data-section="2" value="${this._sections[2].bgColor}">
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Background Opacity</span>
+          <input type="range" min="0" max="100" value="${this._sections[2].bgOpacity}" class="cgm-slider" data-action="setSectionOpacity" data-section="2">
+          <span class="cgm-slider-val">${this._sections[2].bgOpacity}%</span>
+        </div>
+
+        ${this._buildHiddenIconsHTML()}
       </div>
     `;
 
@@ -5316,6 +5946,32 @@ ${paths}  </svg>
         // Dock position — needs re-render (changes bar CSS classes)
         el.querySelector('[data-action="dockBottom"]')?.addEventListener("click", async () => { this._dock = "bottom"; await this._ss("dock", "bottom"); this.render(); });
         el.querySelector('[data-action="dockTop"]')?.addEventListener("click", async () => { this._dock = "top"; await this._ss("dock", "top"); this.render(); });
+        // Sections unlock toggle
+        el.querySelector('[data-action="toggleSectionsUnlock"]')?.addEventListener("click", async () => {
+          this._sectionsUnlocked = !this._sectionsUnlocked;
+          await this._ss("sectionsUnlocked", this._sectionsUnlocked);
+          const toggle = el.querySelector('[data-action="toggleSectionsUnlock"]');
+          if (toggle) {
+            toggle.classList.toggle('cgm-toggle-on', this._sectionsUnlocked);
+            toggle.innerHTML = `<i class="fas ${this._sectionsUnlocked ? 'fa-lock-open' : 'fa-lock'}"></i> ${this._sectionsUnlocked ? 'UNLOCKED' : 'LOCKED'}`;
+          }
+          this.render();
+        });
+        // Unhide hidden icons
+        el.querySelectorAll('[data-action="unhideIcon"]').forEach(btn => {
+          btn.addEventListener("click", async (e) => {
+            const btnId = e.currentTarget.dataset.btnId;
+            if (!btnId) return;
+            const layout = this._getButtonLayout();
+            if (layout[btnId]) {
+              layout[btnId].hidden = false;
+              this._buttonLayout = layout;
+              await this._ss("buttonLayout", layout);
+              ui.notifications.info(`${btnId} icon unhidden.`);
+              this._openPanel("settings"); // Refresh settings panel
+            }
+          });
+        });
         // Opacity — update live
         el.querySelector('[data-action="setOpacity"]')?.addEventListener("input", async (e) => {
           this._opacity = parseInt(e.target.value);
@@ -5340,7 +5996,7 @@ ${paths}  </svg>
           input.addEventListener("input", async (e) => {
             const idx = parseInt(e.target.dataset.section);
             this._sections[idx].width = parseInt(e.target.value);
-            const key = idx === 0 ? "sectionWidth" : "section2Width";
+            const key = idx === 0 ? "sectionWidth" : idx === 1 ? "section2Width" : "section3Width";
             await this._ss(key, this._sections[idx].width);
             const vd = e.target.nextElementSibling;
             if (vd) vd.textContent = `${this._sections[idx].width}%`;
@@ -5351,7 +6007,7 @@ ${paths}  </svg>
           input.addEventListener("input", async (e) => {
             const idx = parseInt(e.target.dataset.section);
             this._sections[idx].bgColor = e.target.value;
-            const key = idx === 0 ? "sectionBgColor" : "section2BgColor";
+            const key = idx === 0 ? "sectionBgColor" : idx === 1 ? "section2BgColor" : "section3BgColor";
             await this._ss(key, this._sections[idx].bgColor);
             _updateSectionStyle(idx);
           });
@@ -5360,11 +6016,87 @@ ${paths}  </svg>
           input.addEventListener("input", async (e) => {
             const idx = parseInt(e.target.dataset.section);
             this._sections[idx].bgOpacity = parseInt(e.target.value);
-            const key = idx === 0 ? "sectionBgOpacity" : "section2BgOpacity";
+            const key = idx === 0 ? "sectionBgOpacity" : idx === 1 ? "section2BgOpacity" : "section3BgOpacity";
             await this._ss(key, this._sections[idx].bgOpacity);
             const vd = e.target.nextElementSibling;
             if (vd) vd.textContent = `${this._sections[idx].bgOpacity}%`;
             _updateSectionStyle(idx);
+          });
+        });
+        // Section label size — update live
+        el.querySelector('[data-action="setSectionLabelSize"]')?.addEventListener("input", async (e) => {
+          this._sectionLabelSize = parseInt(e.target.value);
+          await this._ss("sectionLabelSize", this._sectionLabelSize);
+          const vd = e.target.nextElementSibling;
+          if (vd) vd.textContent = `${this._sectionLabelSize}px`;
+          // Update all label badges live
+          this.element?.querySelectorAll('.cgm-section-label-badge').forEach(lbl => {
+            lbl.style.fontSize = `${this._sectionLabelSize}px`;
+          });
+        });
+        // Section label color — update live (global and per-section)
+        el.querySelectorAll('[data-action="setSectionLabelColor"]').forEach(input => {
+          input.addEventListener("input", async (e) => {
+            const sectionIdx = e.target.dataset.section;
+            if (sectionIdx !== undefined) {
+              // Per-section label color
+              const idx = parseInt(sectionIdx);
+              this._sections[idx].labelColor = e.target.value;
+              const key = idx === 0 ? "section1LabelColor" : idx === 1 ? "section2LabelColor" : "section3LabelColor";
+              await this._ss(key, this._sections[idx].labelColor);
+              // Update only this section's label badge
+              const sectionEls = this.element?.querySelectorAll('.cgm-custom-section');
+              const sec = sectionEls?.[idx];
+              if (sec) {
+                const badge = sec.querySelector('.cgm-section-label-badge');
+                if (badge) badge.style.color = this._sections[idx].labelColor;
+              }
+            } else {
+              // Global label color
+              this._sectionLabelColor = e.target.value;
+              await this._ss("sectionLabelColor", this._sectionLabelColor);
+              // Update all label badges that don't have individual colors set
+              this.element?.querySelectorAll('.cgm-custom-section').forEach((secEl, idx) => {
+                const badge = secEl.querySelector('.cgm-section-label-badge');
+                if (badge && !this._sections[idx]?.labelColor) {
+                  badge.style.color = this._sectionLabelColor;
+                }
+              });
+            }
+          });
+        });
+        // Section label vertical offset — update live
+        el.querySelector('[data-action="setSectionLabelOffset"]')?.addEventListener("input", async (e) => {
+          this._sectionLabelOffset = parseInt(e.target.value);
+          await this._ss("sectionLabelOffset", this._sectionLabelOffset);
+          const vd = e.target.nextElementSibling;
+          if (vd) vd.textContent = `${this._sectionLabelOffset}px`;
+          // Update all label badges live
+          this.element?.querySelectorAll('.cgm-section-label-badge').forEach(lbl => {
+            lbl.style.top = `${this._sectionLabelOffset}px`;
+          });
+        });
+        // Section name — update live
+        el.querySelectorAll('[data-action="setSectionName"]').forEach(input => {
+          input.addEventListener("input", async (e) => {
+            const idx = parseInt(e.target.dataset.section);
+            const name = e.target.value.trim() || `SECTION ${idx + 1}`;
+            this._sections[idx].name = name;
+            // Update names array
+            if (!Array.isArray(this._sectionNames)) this._sectionNames = ["SECTION 1", "SECTION 2", "SECTION 3"];
+            this._sectionNames[idx] = name;
+            await this._ss("sectionNames", this._sectionNames);
+            // Update label badge on taskbar
+            const sectionEls = this.element?.querySelectorAll('.cgm-custom-section');
+            const sec = sectionEls?.[idx];
+            if (sec) {
+              const badge = sec.querySelector('.cgm-section-label-badge');
+              if (badge) badge.textContent = name;
+              sec.title = name;
+            }
+            // Update section title in settings panel
+            const titleEl = el.querySelector(`[data-section-name-title="${idx}"]`);
+            if (titleEl) titleEl.textContent = name;
           });
         });
         // Section position — update live without re-render
@@ -5373,7 +6105,7 @@ ${paths}  </svg>
             const idx = parseInt(e.target.dataset.section);
             const val = parseInt(e.target.value);
             this._sections[idx].position = val;
-            const key = idx === 0 ? "sectionPosition" : "section2Position";
+            const key = idx === 0 ? "sectionPosition" : idx === 1 ? "section2Position" : "section3Position";
             await this._ss(key, val);
             const vd = e.target.nextElementSibling;
             if (vd) vd.textContent = `${val}px`;
@@ -5436,6 +6168,56 @@ ${paths}  </svg>
               b.classList.toggle('cgm-opt-active', b.dataset.shape === newShape);
             });
           });
+        });
+
+        // Background shape — update live
+        el.querySelectorAll('[data-action="setPortraitBgShape"]').forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const newShape = btn.dataset.shape;
+            this._portraitBgShape = newShape;
+            await this._ss("portraitBgShape", newShape);
+            const bg = document.querySelector('.cgm-portraits-bg');
+            if (bg) {
+              bg.classList.remove('cgm-portraits-bg-trapezoid', 'cgm-portraits-bg-rectangle', 'cgm-portraits-bg-rounded', 'cgm-portraits-bg-none');
+              bg.classList.add(`cgm-portraits-bg-${newShape}`);
+              bg.dataset.bgShape = newShape;
+            }
+            el.querySelectorAll('[data-action="setPortraitBgShape"]').forEach(b => {
+              b.classList.toggle('cgm-opt-active', b.dataset.shape === newShape);
+            });
+          });
+        });
+
+        // Background color — update live
+        el.querySelector('[data-action="setPortraitBgColor"]')?.addEventListener("input", async (e) => {
+          const val = e.target.value;
+          this._portraitBgColor = val;
+          await this._ss("portraitBgColor", val);
+          const bg = document.querySelector('.cgm-portraits-bg');
+          if (bg) bg.style.backgroundColor = val;
+          el.querySelector('[data-action="clearPortraitBgColor"]')?.classList.remove('cgm-opt-active');
+        });
+        el.querySelector('[data-action="clearPortraitBgColor"]')?.addEventListener("click", async () => {
+          this._portraitBgColor = "#000000";
+          await this._ss("portraitBgColor", "#000000");
+          const bg = document.querySelector('.cgm-portraits-bg');
+          if (bg) bg.style.backgroundColor = "#000000";
+          const picker = el.querySelector('[data-action="setPortraitBgColor"]');
+          if (picker) picker.value = "#000000";
+          el.querySelectorAll('[data-action="setPortraitBgColor"], [data-action="clearPortraitBgColor"]').forEach(b => {
+            if (b.dataset.action === 'clearPortraitBgColor') b.classList.add('cgm-opt-active');
+          });
+        });
+
+        // Background opacity — update live
+        el.querySelector('[data-action="setPortraitBgOpacity"]')?.addEventListener("input", async (e) => {
+          const val = parseInt(e.target.value);
+          this._portraitBgOpacity = val;
+          await this._ss("portraitBgOpacity", val);
+          const bg = document.querySelector('.cgm-portraits-bg');
+          if (bg) bg.style.opacity = val / 100;
+          const vd = el.querySelector('[data-action="setPortraitBgOpacity"] + .cgm-slider-val');
+          if (vd) vd.textContent = `${val}%`;
         });
 
         // Portrait size — update live
@@ -5697,6 +6479,192 @@ ${paths}  </svg>
         });
         break;
     }
+
+    // Setup drag-and-drop for section buttons if unlocked
+    this._setupSectionDragAndDrop();
+  }
+
+  /* ─── Section Drag and Drop ─── */
+  _setupSectionDragAndDrop() {
+    if (!this.element) return;
+
+    const buttons = this.element.querySelectorAll('.cgm-section-btn[data-btn-id]');
+    const sections = this.element.querySelectorAll('.cgm-custom-section');
+
+    buttons.forEach(btn => {
+      // Skip if already set up (prevents duplicate listeners across re-renders)
+      if (btn.dataset.cgmDragSetup === "true") return;
+
+      // Right-click to customize icon
+      btn.addEventListener('contextmenu', (e) => {
+        if (!this._sectionsUnlocked) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this._showIconCustomizer(btn.dataset.btnId);
+      });
+
+      if (!this._sectionsUnlocked) {
+        btn.draggable = false;
+        btn.classList.remove('cgm-section-btn-unlocked');
+        btn.dataset.cgmDragSetup = "true";
+        return;
+      }
+
+      btn.draggable = true;
+      btn.classList.add('cgm-section-btn-unlocked');
+
+      btn.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/plain', btn.dataset.btnId);
+        e.dataTransfer.effectAllowed = 'move';
+        btn.classList.add('cgm-dragging');
+      });
+
+      btn.addEventListener('dragend', () => {
+        btn.classList.remove('cgm-dragging');
+        sections.forEach(sec => sec.classList.remove('cgm-drag-over'));
+      });
+
+      btn.dataset.cgmDragSetup = "true";
+    });
+
+    sections.forEach((sec, idx) => {
+      sec.addEventListener('dragover', (e) => {
+        if (!this._sectionsUnlocked) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        sec.classList.add('cgm-drag-over');
+      });
+
+      sec.addEventListener('dragleave', () => {
+        sec.classList.remove('cgm-drag-over');
+      });
+
+      sec.addEventListener('drop', async (e) => {
+        if (!this._sectionsUnlocked) return;
+        e.preventDefault();
+        sec.classList.remove('cgm-drag-over');
+
+        const btnId = e.dataTransfer.getData('text/plain');
+        if (!btnId) return;
+
+        const layout = this._getButtonLayout();
+        if (!layout[btnId]) return;
+
+        // Check if this is an injected/dynamic button
+        const btnDef = this._getButtonDefs().find(b => b.id === btnId);
+        const isInjected = btnDef?.isDynamic === true;
+
+        // Move the DOM element directly — works for both static and injected buttons
+        const btnEl = this.element?.querySelector(`.cgm-section-btn[data-btn-id="${btnId}"]`);
+        if (btnEl) {
+          const targetContent = sec.querySelector('.cgm-section-buttons');
+          if (targetContent) {
+            targetContent.appendChild(btnEl);
+          }
+        }
+        // Update our tracking so next render places it correctly
+        layout[btnId].section = idx;
+        this._buttonLayout = layout;
+        await this._ss("buttonLayout", layout);
+      });
+    });
+  }
+
+  /* ─── Icon Customizer Dialog ─── */
+  _showIconCustomizer(btnId) {
+    const btnDef = this._getButtonDefs().find(b => b.id === btnId);
+    if (!btnDef) return;
+
+    const layout = this._getButtonLayout();
+    const cfg = layout[btnId] || {};
+    const currentSize = cfg.size || 16;
+    const currentColor = cfg.color || btnDef.color || "";
+    const currentSection = cfg.section ?? btnDef.defaultSection;
+    const isHidden = cfg.hidden === true;
+
+    const dlg = document.createElement('div');
+    dlg.className = 'cgm-icon-customizer';
+    dlg.innerHTML = `
+      <div class="cgm-icon-customizer-title">Customize: ${btnDef.title}</div>
+      <div class="cgm-icon-customizer-row">
+        <label>Icon Size</label>
+        <input type="range" min="8" max="40" value="${currentSize}" class="cgm-slider" id="cgm-icon-size">
+        <span class="cgm-slider-val">${currentSize}px</span>
+      </div>
+      <div class="cgm-icon-customizer-row">
+        <label>Icon Color</label>
+        <input type="color" value="${currentColor || '#ffffff'}" id="cgm-icon-color">
+      </div>
+      <div class="cgm-icon-customizer-row">
+        <label>Section</label>
+        <select id="cgm-icon-section" class="cgm-select">
+          <option value="0" ${currentSection === 0 ? 'selected' : ''}>Section 1</option>
+          <option value="1" ${currentSection === 1 ? 'selected' : ''}>Section 2</option>
+          <option value="2" ${currentSection === 2 ? 'selected' : ''}>Section 3</option>
+        </select>
+      </div>
+      <div class="cgm-icon-customizer-row">
+        <label>Hidden</label>
+        <button class="cgm-toggle ${isHidden ? 'cgm-toggle-on' : ''}" id="cgm-icon-hide"><span class="cgm-toggle-knob"></span></button>
+      </div>
+      <div class="cgm-icon-customizer-preview">
+        <i class="fas ${btnDef.icon}" style="font-size:${currentSize}px;color:${currentColor || 'inherit'};"></i>
+      </div>
+      <div class="cgm-icon-customizer-actions">
+        <button class="cgm-btn cgm-btn-primary" data-action="saveIcon">Save</button>
+        <button class="cgm-btn" data-action="cancelIcon">Cancel</button>
+      </div>
+    `;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cgm-icon-customizer-overlay';
+    overlay.appendChild(dlg);
+    document.body.appendChild(overlay);
+
+    // Live preview
+    const sizeInput = dlg.querySelector('#cgm-icon-size');
+    const colorInput = dlg.querySelector('#cgm-icon-color');
+    const preview = dlg.querySelector('.cgm-icon-customizer-preview i');
+    const sizeVal = dlg.querySelector('.cgm-slider-val');
+    const hideToggle = dlg.querySelector('#cgm-icon-hide');
+
+    sizeInput.addEventListener('input', () => {
+      preview.style.fontSize = `${sizeInput.value}px`;
+      sizeVal.textContent = `${sizeInput.value}px`;
+    });
+    colorInput.addEventListener('input', () => {
+      preview.style.color = colorInput.value;
+    });
+    hideToggle.addEventListener('click', () => {
+      hideToggle.classList.toggle('cgm-toggle-on');
+    });
+
+    // Save
+    dlg.querySelector('[data-action="saveIcon"]')?.addEventListener('click', async () => {
+      const newSize = parseInt(sizeInput.value);
+      const newColor = colorInput.value;
+      const newSection = parseInt(dlg.querySelector('#cgm-icon-section').value);
+      const newHidden = hideToggle.classList.contains('cgm-toggle-on');
+      layout[btnId] = layout[btnId] || {};
+      layout[btnId].size = newSize;
+      layout[btnId].color = newColor === '#ffffff' && !btnDef.color ? '' : newColor;
+      layout[btnId].section = newSection;
+      layout[btnId].hidden = newHidden;
+      this._buttonLayout = layout;
+      await this._ss("buttonLayout", layout);
+      overlay.remove();
+      this.render();
+    });
+
+    // Cancel
+    dlg.querySelector('[data-action="cancelIcon"]')?.addEventListener('click', () => {
+      overlay.remove();
+    });
+
+    // Close on overlay click
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.remove();
+    });
   }
 
   /* ─── Auto-Hide ─── */
@@ -5905,6 +6873,17 @@ ${paths}  </svg>
    ═══════════════════════════════════════════════════════════════ */
 
 function registerSettings() {
+  // World-scoped per-user synced settings (replaces all client-scoped settings)
+  game.settings.register(MODULE_ID, "userSettings", {
+    name: "User Settings",
+    hint: "Per-user taskbar settings synced across all browsers.",
+    scope: "world",
+    config: false,
+    type: Object,
+    default: {}
+  });
+
+  // Keep old client-scoped settings for backward compatibility (migration source)
   game.settings.register(MODULE_ID, "dock", { name: "Dock Position", hint: "Where the taskbar appears.", scope: "client", config: false, type: String, default: "bottom", choices: { bottom: "Bottom", top: "Top" } });
   game.settings.register(MODULE_ID, "opacity", { name: "Opacity", hint: "Taskbar opacity percentage.", scope: "client", config: false, type: Number, default: 100, range: { min: 50, max: 100, step: 5 } });
   game.settings.register(MODULE_ID, "compact", { name: "Compact Mode", hint: "Show compact buttons.", scope: "client", config: false, type: Boolean, default: false });
@@ -5940,6 +6919,14 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "section2BgColor", { name: "Section 2 Background Color", hint: "Background color of SECTION 2.", scope: "client", config: false, type: String, default: "#ffffff" });
   game.settings.register(MODULE_ID, "section2BgOpacity", { name: "Section 2 Background Opacity", hint: "Background opacity of SECTION 2 (0-100).", scope: "client", config: false, type: Number, default: 30 });
   game.settings.register(MODULE_ID, "section2Position", { name: "Section 2 Position", hint: "Horizontal offset of SECTION 2 in pixels (0-200).", scope: "client", config: false, type: Number, default: 0 });
+  // SECTION 3 settings
+  game.settings.register(MODULE_ID, "section3Width", { name: "Section 3 Width", hint: "Width of SECTION 3 as a percentage.", scope: "client", config: false, type: Number, default: 10 });
+  game.settings.register(MODULE_ID, "section3BgColor", { name: "Section 3 Background Color", hint: "Background color of SECTION 3.", scope: "client", config: false, type: String, default: "#ffffff" });
+  game.settings.register(MODULE_ID, "section3BgOpacity", { name: "Section 3 Background Opacity", hint: "Background opacity of SECTION 3 (0-100).", scope: "client", config: false, type: Number, default: 30 });
+  game.settings.register(MODULE_ID, "section3Position", { name: "Section 3 Position", hint: "Horizontal offset of SECTION 3 in pixels (0-200).", scope: "client", config: false, type: Number, default: 0 });
+  // Section unlock & button layout
+  game.settings.register(MODULE_ID, "sectionsUnlocked", { name: "Unlock Sections", hint: "Allow dragging icons between sections and customizing them.", scope: "client", config: false, type: Boolean, default: false });
+  game.settings.register(MODULE_ID, "buttonLayout", { name: "Button Layout", hint: "Stores button section assignments, sizes, and colors (JSON).", scope: "client", config: false, type: Object, default: {} });
   game.settings.register(MODULE_ID, "portraitVisibilityMode", { name: "Portrait Visibility Mode", hint: "Filter which player actor portraits are shown above the taskbar.", scope: "client", config: false, type: String, default: "all", choices: { all: "All", active: "Active Only", hide: "Hide All" } });
   // Disconnection sound settings
   game.settings.register(MODULE_ID, "disconnectionSound", { name: "Disconnection Sound", hint: "Sound file to play when a player disconnects. Leave empty for no sound.", scope: "world", config: true, type: String, default: "" });
@@ -5961,10 +6948,15 @@ Hooks.once("init", () => {
 });
 
 Hooks.once("ready", () => {
-  if (!game.user?.isGM) { console.log(`${MODULE_ID} | v3.17.39 | User is not GM — taskbar skipped`); return; }
+  if (!game.user?.isGM) { console.log(`${MODULE_ID} | User is not GM — taskbar skipped`); return; }
   const disabled = (() => { try { return game.settings.get(MODULE_ID, "disableGMTaskbar"); } catch { return false; } })();
   if (disabled) { console.log(`${MODULE_ID} | GM Taskbar disabled in settings`); return; }
-  setTimeout(() => { window.cypherGMTaskbar = new GMTaskbar(); window.cypherGMTaskbar.render(); console.log(`${MODULE_ID} | GM taskbar rendered`); }, 500);
+  setTimeout(async () => {
+    window.cypherGMTaskbar = new GMTaskbar();
+    await window.cypherGMTaskbar._migrateSettings();
+    window.cypherGMTaskbar.render();
+    console.log(`${MODULE_ID} | GM taskbar rendered`);
+  }, 500);
 });
 
 /* File picker button for disconnection sound setting */

@@ -184,6 +184,14 @@ class GroupStatusesMenu {
   _showEffectsMenu() {
     if (this._effectsEl) { this._hideEffectsMenu(); return; }
 
+    // Try DFreds Convenient Effects first
+    const ce = game.modules.get("dfreds-convenient-effects")?.api;
+    if (ce) {
+      this._showDfredsEffectsMenu();
+      return;
+    }
+
+    // Fallback to hardcoded effects if DFreds is not available
     const effects = [
       { key: "dead", label: "Dead", icon: "fa-skull" },
       { key: "prone", label: "Prone", icon: "fa-person-falling" },
@@ -198,6 +206,128 @@ class GroupStatusesMenu {
       this._pending = { type: "status", key };
       this._showConfirm();
     });
+  }
+
+  _showDfredsEffectsMenu() {
+    const ce = game.modules.get("dfreds-convenient-effects")?.api;
+    if (!ce) return;
+
+    let effects = [];
+    try {
+      effects = (ce.findEffects() || []).map(e => ({
+        id: e.id || e._id,
+        name: e.name,
+        img: e.img || e.icon || "icons/svg/aura.svg",
+        ceId: e.getFlag?.("dfreds-convenient-effects", "ceEffectId") || e.id,
+      })).sort((a, b) => a.name.localeCompare(b.name));
+    } catch (err) {
+      console.warn("Cypher GM Taskbar | Failed to get DFreds effects:", err);
+    }
+
+    if (effects.length === 0) {
+      ui.notifications.warn("No DFreds Convenient Effects found.");
+      return;
+    }
+
+    const panelW = 340;
+    const panelH = 440;
+
+    // Position relative to main menu
+    const mainRect = this._menuEl?.getBoundingClientRect();
+    let left, top;
+    if (mainRect) {
+      const mainCx = mainRect.left + mainRect.width / 2;
+      const mainCy = mainRect.top + mainRect.height / 2;
+      left = mainCx + 120;
+      top = mainCy - panelH / 2;
+    } else {
+      left = (window.innerWidth - panelW) / 2;
+      top = (window.innerHeight - panelH) / 2;
+    }
+    left = Math.max(10, Math.min(left, window.innerWidth - panelW - 10));
+    top = Math.max(10, Math.min(top, window.innerHeight - panelH - 10));
+
+    const panel = document.createElement("div");
+    panel.className = "cgm-effects-picker cgm-gstatus-effects-picker";
+    panel.style.cssText = `position:fixed;left:${left}px;top:${top}px;width:${panelW}px;height:${panelH}px;z-index:202;`;
+
+    const itemsHtml = effects.map(eff => `
+      <div class="cgm-effect-item" data-effect-id="${eff.ceId}">
+        <img src="${eff.img}" alt="" />
+        <span>${this._escapeHTML(eff.name)}</span>
+      </div>
+    `).join("");
+
+    panel.innerHTML = `
+      <div class="cgm-effects-picker-header">
+        <span><i class="fas fa-sparkles"></i> Choose Effect</span>
+        <button class="cgm-effects-picker-close" title="Close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="cgm-effects-picker-search">
+        <i class="fas fa-search"></i>
+        <input type="text" placeholder="Search effects..." />
+      </div>
+      <div class="cgm-effects-picker-grid">
+        ${itemsHtml}
+      </div>
+      <div class="cgm-effects-picker-footer">
+        <span>${effects.length} effects</span>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    this._effectsEl = panel;
+    requestAnimationFrame(() => panel.classList.add("cgm-effects-picker-visible"));
+
+    // Close button
+    panel.querySelector(".cgm-effects-picker-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._hideEffectsMenu();
+    });
+
+    // Search filter
+    const searchInput = panel.querySelector(".cgm-effects-picker-search input");
+    searchInput?.addEventListener("input", (e) => {
+      const q = e.target.value.toLowerCase();
+      panel.querySelectorAll(".cgm-effect-item").forEach(item => {
+        const name = item.querySelector("span")?.textContent?.toLowerCase() || "";
+        item.style.display = name.includes(q) ? "" : "none";
+      });
+    });
+
+    // Effect click
+    panel.querySelectorAll(".cgm-effect-item").forEach(item => {
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const effectId = item.dataset.effectId;
+        const effect = effects.find(eff => eff.ceId === effectId);
+        if (effect) {
+          this._pending = { type: "dfredsEffect", effectId: effect.ceId, effectName: effect.name };
+          this._hideEffectsMenu();
+          this._showConfirm();
+        }
+      });
+    });
+
+    // Draw line from main menu
+    requestAnimationFrame(() => {
+      const menuRect = this._menuEl?.getBoundingClientRect();
+      const pRect = panel.getBoundingClientRect();
+      if (menuRect) {
+        this._createLine("cgm-gstatus-line-status",
+          menuRect.left + menuRect.width / 2, menuRect.top + menuRect.height / 2,
+          pRect.left + pRect.width / 2, pRect.top + pRect.height / 2);
+      }
+    });
+
+    // Outside click
+    const closeHandler = (e) => {
+      if (!panel.contains(e.target) && !this._menuEl?.contains(e.target)) {
+        this._hideEffectsMenu();
+        document.removeEventListener("click", closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeHandler), 10);
   }
 
   _hideEffectsMenu() {
@@ -655,12 +785,13 @@ class GroupStatusesMenu {
 
     const pending = this._pending;
     const pcs = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
-    const typeLabels = { status: "Apply Status", attribute: "Change Attribute", health: "Set Health" };
+    const typeLabels = { status: "Apply Status", attribute: "Change Attribute", health: "Set Health", dfredsEffect: "Apply Effect" };
     const actionLabel = typeLabels[pending.type] || "Apply";
+    const detailText = pending.type === "dfredsEffect" ? pending.effectName : pending.key;
 
     let content = `
       <div class="cgm-confirm-dialog">
-        <h3>${actionLabel}: ${pending.key}</h3>
+        <h3>${actionLabel}: ${detailText}</h3>
         <p class="cgm-confirm-subtitle">Select actors to apply:</p>
         <div class="cgm-confirm-actors">
     `;
@@ -739,7 +870,7 @@ class GroupStatusesMenu {
 
   _applyStatus(pending, actorIds) {
     const actors = actorIds.map(id => game.actors.get(id)).filter(a => a);
-    const typeLabels = { status: { key: "status", label: "Status" }, attribute: { key: "attribute", label: "Attribute" }, health: { key: "health", label: "Health" } };
+    const typeLabels = { status: { key: "status", label: "Status" }, attribute: { key: "attribute", label: "Attribute" }, health: { key: "health", label: "Health" }, dfredsEffect: { key: "effect", label: "Effect" } };
     const typeInfo = typeLabels[pending.type];
 
     actors.forEach(actor => {
@@ -759,17 +890,28 @@ class GroupStatusesMenu {
         const healthStates = { hale: 0, debilitated: 1, incapacitated: 2 };
         const stateValue = healthStates[pending.key] ?? 0;
         actor.update({ "system.health.status": stateValue });
+      } else if (pending.type === "dfredsEffect") {
+        const ce = game.modules.get("dfreds-convenient-effects")?.api;
+        if (ce) {
+          ce.toggleEffect({ effectId: pending.effectId, uuids: [actor.uuid] }).catch(err => {
+            console.error("Cypher GM Taskbar | Failed to toggle DFreds effect:", err);
+          });
+        }
       }
     });
 
     const names = actors.map(a => a.name).join(", ");
-    ui.notifications.info(`<b>Group ${typeInfo.label}</b> applied to: ${names || "No actors"}`);
+    const effectName = pending.type === "dfredsEffect" ? pending.effectName : "";
+    const msg = effectName
+      ? `<b>Effect "${effectName}"</b> applied to: ${names || "No actors"}`
+      : `<b>Group ${typeInfo.label}</b> applied to: ${names || "No actors"}`;
+    ui.notifications.info(msg);
 
     if (game.socket) {
       game.socket.emit("module.cypher-gm-taskbar", {
         action: "groupStatusUpdate",
         type: pending.type,
-        key: pending.key,
+        key: pending.key || pending.effectId,
         actorIds,
         gmId: game.user.id,
       });
@@ -849,5 +991,10 @@ class GroupStatusesMenu {
     };
     segs.forEach(s => s.addEventListener("click", onSegClick));
     lbls.forEach(l => l.addEventListener("click", onSegClick));
+  }
+
+  _escapeHTML(str) {
+    if (!str) return "";
+    return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
   }
 }
