@@ -1,5 +1,5 @@
 /**
- * Cypher GM Taskbar v4.5.3
+ * Cypher GM Taskbar v4.5.26
  * Foundry VTT v13+ | Cypher System
  *
  * GM-only taskbar with combat tracker, intrusions, cyphers, recovery,
@@ -44,10 +44,12 @@ class GMTaskbar {
     this._autoHideTimer = null;
     this._isHidden = false;
     this._connInterval = null;
-    this._actorNotes = {};
     this._radialMenuEl = null;
     this._tooltipEl = null;
     this._tooltipTimer = null;
+    this._effectTooltipEl = null;
+    this._effectTooltipTimer = null;
+    this._itemTooltipEl = null;
     this._radialMenuSize = 200;
     this._radialMenuOffset = 20;
     this._notesPanelEl = null;
@@ -55,7 +57,8 @@ class GMTaskbar {
     this._sections = [
       { id: "section1", name: "SECTION 1", width: 10, bgColor: "#ffffff", bgOpacity: 30, labelColor: "" },
       { id: "section2", name: "SECTION 2", width: 10, bgColor: "#ffffff", bgOpacity: 30, labelColor: "" },
-      { id: "section3", name: "SECTION 3", width: 10, bgColor: "#ffffff", bgOpacity: 30, labelColor: "" }
+      { id: "section3", name: "SECTION 3", width: 10, bgColor: "#ffffff", bgOpacity: 30, labelColor: "" },
+      { id: "section4", name: "TRAY", width: 15, bgColor: "#1a1020", bgOpacity: 50, labelColor: "" }
     ];
     this._notesPanelPos = null;
     this._portraitVisibilityMode = this._gs("portraitVisibilityMode", "all");
@@ -68,6 +71,17 @@ class GMTaskbar {
     this._damagePanelEl = null;
     this._damagePanelPos = null;
     this._damageLineStart = null;
+    this._cashValuesPanelEl = null;
+    this._cashValuesPanelPos = null;
+    this._cashValuesLineStart = null;
+    this._assetsPanelEl = null;
+    this._assetsPanelPos = null;
+    this._assetsLineStart = null;
+    this._itemsPanelEl = null;
+    this._itemsPanelPos = null;
+    this._itemsPanelSize = null;
+    this._itemsLineStart = null;
+    this._dropItemPanelEl = null;
     this._recoveryPanelEl = null;
     this._recoveryPanelPos = null;
     this._recoveryLineStart = null;
@@ -76,7 +90,7 @@ class GMTaskbar {
     this._cyphersLineStart = null;
     this._notesSubMenuEl = null;
     this._targetSubMenuEl = null;
-    this._damageSubMenuEl = null;
+    this._valuesSubMenuEl = null;
     this._recoverySubMenuEl = null;
     this._cyphersSubMenuEl = null;
     this._effectsPickerEl = null;
@@ -85,40 +99,72 @@ class GMTaskbar {
     this._gmGroupRollSkillsEl = null;
     this._gmGroupRollFreeEl = null;
     this._gmGroupRollDefenseEl = null;
+    this._recoveryTaskbarMenuEl = null;
+    this._reputationPanelEl = null;
+    this._reputationPanelPos = null;
     this._groupStatuses = new GroupStatusesMenu(this);
+    // Tray (Section 4) — minimized window tracking
+    this._trayApps = new Map();
+    this._trayInterval = null;
     this._subMenuPositions = {};
     this._lastDifficulty = 0;
     this._dynamicButtons = []; // Discovered injected buttons from other modules
     this._loadSettings();
-    this._loadActorNotes();
     this._loadPanelPositions();
   }
 
-  /* Load saved panel positions from localStorage */
+  /* Load saved panel positions from synced settings (with localStorage fallback for migration) */
   _loadPanelPositions() {
+    try {
+      // Try synced settings first
+      const synced = this._gs("panelPositions", null);
+      if (synced) {
+        this._notesPanelPos = synced.notes || null;
+        this._targetPanelPos = synced.target || null;
+        this._damagePanelPos = synced.damage || null;
+        this._cashValuesPanelPos = synced.cashValues || null;
+        this._assetsPanelPos = synced.assets || null;
+        this._itemsPanelPos = synced.items || null;
+        this._itemsPanelSize = synced.itemsSize || null;
+        this._recoveryPanelPos = synced.recovery || null;
+        this._cyphersPanelPos = synced.cyphers || null;
+        this._subMenuPositions = synced.subMenus || {};
+        return;
+      }
+    } catch {}
+
+    // Fallback: localStorage (for migration from old versions)
     try {
       const data = JSON.parse(localStorage.getItem("cgm-panel-positions") || "{}");
       this._notesPanelPos = data.notes || null;
       this._targetPanelPos = data.target || null;
       this._damagePanelPos = data.damage || null;
+      this._cashValuesPanelPos = data.cashValues || null;
+      this._assetsPanelPos = data.assets || null;
+      this._itemsPanelPos = data.items || null;
+      this._itemsPanelSize = data.itemsSize || null;
       this._recoveryPanelPos = data.recovery || null;
       this._cyphersPanelPos = data.cyphers || null;
       this._subMenuPositions = data.subMenus || {};
     } catch {}
   }
 
-  /* Save panel positions to localStorage */
-  _savePanelPositions() {
+  /* Save panel positions to synced settings */
+  async _savePanelPositions() {
     try {
       const data = {
         notes: this._notesPanelPos,
         target: this._targetPanelPos,
         damage: this._damagePanelPos,
+        cashValues: this._cashValuesPanelPos,
+        assets: this._assetsPanelPos,
+        items: this._itemsPanelPos,
+        itemsSize: this._itemsPanelSize,
         recovery: this._recoveryPanelPos,
         cyphers: this._cyphersPanelPos,
         subMenus: this._subMenuPositions,
       };
-      localStorage.setItem("cgm-panel-positions", JSON.stringify(data));
+      await this._ss("panelPositions", data);
     } catch {}
   }
 
@@ -135,11 +181,11 @@ class GMTaskbar {
   _gs(key, fallback = null) {
     try {
       // Use per-user synced settings (world scope, keyed by user ID)
-      const userData = game.settings.get(MODULE_ID, "userSettings") || {};
+      const userData = foundry.utils.deepClone(game.settings.get(MODULE_ID, "userSettings") || {});
       const userId = game.user?.id || "default";
-      if (userData[userId] && key in userData[userId]) return userData[userId][key];
+      if (userData[userId] && key in userData[userId]) return foundry.utils.deepClone(userData[userId][key]);
       // Fallback: try old client-scoped setting for migration
-      try { return game.settings.get(MODULE_ID, key); } catch {}
+      try { return foundry.utils.deepClone(game.settings.get(MODULE_ID, key)); } catch {}
       return fallback;
     } catch { return fallback; }
   }
@@ -147,9 +193,9 @@ class GMTaskbar {
   async _ss(key, value) {
     try {
       const userId = game.user?.id || "default";
-      const userData = game.settings.get(MODULE_ID, "userSettings") || {};
+      const userData = foundry.utils.deepClone(game.settings.get(MODULE_ID, "userSettings") || {});
       if (!userData[userId]) userData[userId] = {};
-      userData[userId][key] = value;
+      userData[userId][key] = foundry.utils.deepClone(value);
       await game.settings.set(MODULE_ID, "userSettings", userData);
     } catch (e) { console.warn(`${MODULE_ID} | Failed to save setting "${key}":`, e); }
   }
@@ -235,6 +281,11 @@ class GMTaskbar {
     this._sections[2].bgColor = this._gs("section3BgColor", "#ffffff");
     this._sections[2].bgOpacity = this._gs("section3BgOpacity", 30);
     this._sections[2].position = this._gs("section3Position", 0);
+    // Load SECTION 4 (Tray) settings
+    this._sections[3].width = this._gs("section4Width", 15);
+    this._sections[3].bgColor = this._gs("section4BgColor", "#1a1020");
+    this._sections[3].bgOpacity = this._gs("section4BgOpacity", 50);
+    this._sections[3].position = this._gs("section4Position", 0);
     // Load section label settings
     this._sectionLabelSize = this._gs("sectionLabelSize", 10);
     this._sectionLabelColor = this._gs("sectionLabelColor", "#c8a96e");
@@ -243,17 +294,19 @@ class GMTaskbar {
     this._sections[0].labelColor = this._gs("section1LabelColor", "");
     this._sections[1].labelColor = this._gs("section2LabelColor", "");
     this._sections[2].labelColor = this._gs("section3LabelColor", "");
+    this._sections[3].labelColor = this._gs("section4LabelColor", "");
     // Load section names (custom labels)
-    this._sectionNames = this._gs("sectionNames", ["SECTION 1", "SECTION 2", "SECTION 3"]);
-    if (!Array.isArray(this._sectionNames) || this._sectionNames.length < 3) {
-      this._sectionNames = ["SECTION 1", "SECTION 2", "SECTION 3"];
+    this._sectionNames = this._gs("sectionNames", ["SECTION 1", "SECTION 2", "SECTION 3", "TRAY"]);
+    if (!Array.isArray(this._sectionNames) || this._sectionNames.length < 4) {
+      this._sectionNames = ["SECTION 1", "SECTION 2", "SECTION 3", "TRAY"];
     }
     // Apply custom names to section objects
     this._sections.forEach((sec, i) => { sec.name = this._sectionNames[i] || sec.name; });
     // Load unlock setting
     this._sectionsUnlocked = this._gs("sectionsUnlocked", false);
-    // Load button layout config
-    this._buttonLayout = this._gs("buttonLayout", null);
+    // Load button layout config — ensure it's always an object so
+    // _getButtonLayout() never falls back to defaultSection values
+    this._buttonLayout = this._gs("buttonLayout", null) || {};
     this._settingsTab = "general";
   }
 
@@ -266,6 +319,7 @@ class GMTaskbar {
     if (this._connInterval) clearInterval(this._connInterval);
     if (this._playerMonitorInterval) clearInterval(this._playerMonitorInterval);
     if (this._autoHideTimer) clearTimeout(this._autoHideTimer);
+    if (this._trayInterval) clearInterval(this._trayInterval);
 
     const bar = document.createElement("div");
     bar.id = `${MODULE_ID}-bar`;
@@ -281,10 +335,13 @@ class GMTaskbar {
 
     this._applySettings();
     this._bindEvents();
+    this._setupSectionDragAndDrop();
+    this._restoreButtonOrder();   // restore saved button order within sections
     this._bindPortraitEvents();
     this._startConnectionMonitor();
     this._startPlayerMonitor();
     this._setupAutoHide();
+    this._startTray();              // start minimized window tray
 
     // Sync portrait background width to match float (after DOM is ready)
     this._syncPortraitBgWidth();
@@ -301,12 +358,14 @@ class GMTaskbar {
     setTimeout(() => {
       this._discoverDynamicButtons();
       this._correctDynamicButtonPositions();
+      this._restoreButtonOrder();
     }, 0);
 
     // Phase 3: Fallback for late injectors
     setTimeout(() => {
       this._discoverDynamicButtons();
       this._correctDynamicButtonPositions();
+      this._restoreButtonOrder();
     }, 500);
 
     if (this.activePanel) this._openPanel(this.activePanel);
@@ -333,6 +392,10 @@ class GMTaskbar {
       { id: "cypherlog", action: "openCypherLog", icon: "fa-book-open", color: "", title: "Cypher Log", defaultSection: 1, requiresModule: "cypher-log" },
       { id: "scene", action: "openSceneControl", icon: "fa-map", color: "", title: "Scene Control", defaultSection: 1 },
       { id: "npc", action: "openNPCCanvas", icon: "fa-users", color: "", title: "NPC Canvas", defaultSection: 1 },
+      { id: "enemy", action: "openEnemyCanvas", icon: "fa-tooth", color: "#cc3333", title: "Enemy Canvas", defaultSection: 1 },
+      { id: "items", action: "openItemsCanvas", icon: "fa-hammer", color: "", title: "Items", defaultSection: 1 },
+      { id: "reputation", action: "openReputation", icon: "fa-handshake", color: "#e8a87c", title: "Reputation and gossips", defaultSection: 1 },
+      { id: "recovery", action: "openRecoveryMenu", icon: "fa-droplet", color: "#3b82f6", title: "Recovery", defaultSection: 0 },
     ];
     // Merge with dynamically discovered buttons (injected by other modules)
     return [...staticBtns, ...this._dynamicButtons];
@@ -367,7 +430,7 @@ class GMTaskbar {
 
     // Only skip our built-in static buttons — injected buttons must be re-discovered
     // after every render since their DOM elements (and event listeners) are destroyed
-    const staticIds = new Set(["gmroll", "groupstatus", "quickscene", "cypherlog", "scene", "npc"]);
+    const staticIds = new Set(["gmroll", "groupstatus", "quickscene", "cypherlog", "scene", "npc", "items"]);
     const dynamic = [];
     const sections = bar.querySelectorAll('.cgm-custom-section');
 
@@ -521,6 +584,7 @@ class GMTaskbar {
     const secHTML = this._buildSectionHTML(0, this._buildSectionButtonsHTML(0));
     const sec2HTML = this._buildSectionHTML(1, this._buildSectionButtonsHTML(1));
     const sec3HTML = this._buildSectionHTML(2, this._buildSectionButtonsHTML(2));
+    const sec4HTML = this._buildSectionHTML(3, this._buildTrayHTML());
 
     return `
       <!-- Floating player portraits above bar -->
@@ -577,6 +641,9 @@ class GMTaskbar {
         <!-- SECTION 3 -->
         ${sec3HTML}
 
+        <!-- SECTION 4: Tray -->
+        ${sec4HTML}
+
         <div class="cgm-spacer"></div>
 
         <!-- Right side section -->
@@ -616,16 +683,17 @@ class GMTaskbar {
     const labelSize = this._sectionLabelSize || 10;
     const labelColor = sec.labelColor || this._sectionLabelColor || "#c8a96e";
     const labelOffset = this._sectionLabelOffset ?? -8;
+    const isTray = index === 3;
     return `
-      <div class="cgm-custom-section" title="${sec.name}" style="width: ${sec.width}%; background: ${bgStyle}; ${posStyle}">
+      <div class="cgm-custom-section${isTray ? ' cgm-tray-section' : ''}" title="${sec.name}" style="width: ${sec.width}%; background: ${bgStyle}; ${posStyle}">
         <div class="cgm-section-label-badge" style="font-size:${labelSize}px;color:${labelColor};top:${labelOffset}px;">${sec.name}</div>
-        <div class="cgm-section-separator cgm-sep-left"></div>
+        ${!isTray ? '<div class="cgm-section-separator cgm-sep-left"></div>' : ''}
         <div class="cgm-section-content">
           <div class="cgm-section-buttons">
             ${extraButtons}
           </div>
         </div>
-        <div class="cgm-section-separator cgm-sep-right"></div>
+        ${!isTray ? '<div class="cgm-section-separator cgm-sep-right"></div>' : ''}
       </div>
     `;
   }
@@ -752,6 +820,7 @@ class GMTaskbar {
           const dmgColor = this._getDamageTrackColor(pc.damageTrack);
           const bColor = borderColor || dmgColor;
           const xpCircle = this._buildXPCircle(pc.xp, xpSize);
+          const recoveryDrops = this._buildRecoveryDrops(pc.recoveryRolls);
           const actor = game.actors.get(pc.id);
           const individualDiff = actor?.getFlag("cypher-gm-taskbar", "targetDifficulty") ?? 0;
           const isDisconnected = this._disconnectedActors?.has(pc.id);
@@ -759,10 +828,13 @@ class GMTaskbar {
           <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isDisconnected ? 'cgm-portrait-disconnected' : ''}" data-actor-id="${pc.id}">
             <div class="cgm-portrait-difficulty ${individualDiff > 0 ? 'cgm-difficulty-active' : ''}">${individualDiff > 0 ? individualDiff : ''}</div>
             ${isDisconnected ? '<div class="cgm-offline-badge"><i class="fas fa-wifi-slash"></i></div>' : ''}
-            <div class="cgm-portrait-img-wrap ${shapeCls}" style="width:${size}px;height:${size}px;">
-              <img src="${pc.img}" alt="${pc.name}" class="cgm-portrait-img"
-                   style="border-color: ${bColor}; border-width: ${borderWidth}px; object-fit: ${fit};">
-              <div class="cgm-portrait-damage cgm-damage-${pc.damageTrack.toLowerCase()}"></div>
+            <div class="cgm-portrait-visual">
+              ${this._buildEffectIconsHTML(pc, size)}
+              <div class="cgm-portrait-img-wrap ${shapeCls}" style="width:${size}px;height:${size}px;">
+                <img src="${pc.img}" alt="${pc.name}" class="cgm-portrait-img"
+                     style="border-color: ${bColor}; border-width: ${borderWidth}px; object-fit: ${fit};">
+                <div class="cgm-portrait-damage cgm-damage-${pc.damageTrack.toLowerCase()}"></div>
+              </div>
             </div>
             <div class="cgm-portrait-info">
               <div class="cgm-portrait-name" style="font-size:${nameSize}px;color:${nColor};margin-left:${nameOffset}px;">${pc.name}</div>
@@ -772,6 +844,7 @@ class GMTaskbar {
                 <div class="cgm-portrait-pool-bar"><div class="cgm-portrait-pool-fill cgm-pool-intellect" style="width:${pc.pools.intellect.percent}%"></div></div>
               </div>
               <div class="cgm-xp-wrap" style="margin-left:${xpOffsetX}px;margin-top:${xpOffsetY}px;">${xpCircle}</div>
+              <div class="cgm-recovery-wrap">${recoveryDrops}</div>
             </div>
           </div>`;
         }).join("")}
@@ -779,53 +852,81 @@ class GMTaskbar {
     `;
   }
 
-  _loadActorNotes() {
-    const raw = this._gs("actorNotes", "");
-    try { this._actorNotes = raw ? JSON.parse(raw) : {}; } catch { this._actorNotes = {}; }
-    console.log(`${MODULE_ID} | Notes loaded:`, this._actorNotes);
+  /**
+   * Build HTML for active effect icons displayed above the portrait.
+   * Shows up to 5 tiny icons; remaining count badge if more exist.
+   */
+  _buildEffectIconsHTML(pc, portraitSize) {
+    const effects = pc.activeEffects || [];
+    if (!effects.length) return '';
+
+    const maxVisible = 5;
+    const visible = effects.slice(0, maxVisible);
+    const remaining = effects.length - maxVisible;
+
+    // Scale icon size with portrait size (clamped 12-20px)
+    const iconSize = Math.max(12, Math.min(20, Math.round(portraitSize * 0.28)));
+
+    return `
+      <div class="cgm-portrait-effects" data-actor-id="${pc.id}">
+        ${visible.map(eff => `
+          <div class="cgm-effect-icon"
+               data-effect-id="${eff.id}"
+               style="width:${iconSize}px;height:${iconSize}px;">
+            <img src="${eff.icon}" alt="${eff.name}"
+                 style="width:100%;height:100%;object-fit:cover;border-radius:3px;">
+            ${eff.isTemporary ? '<span class="cgm-effect-temp-badge"></span>' : ''}
+          </div>
+        `).join('')}
+        ${remaining > 0 ? `<div class="cgm-effect-more">+${remaining}</div>` : ''}
+      </div>
+    `;
   }
 
-  async _saveActorNotes() {
-    try {
-      await this._ss("actorNotes", JSON.stringify(this._actorNotes));
-      console.log(`${MODULE_ID} | Notes saved:`, this._actorNotes);
-    } catch (err) {
-      console.error(`${MODULE_ID} | Failed to save notes:`, err);
-    }
-  }
+  /* ─── Actor Notes (stored on actor flags — visible to all users) ─── */
 
-  _getActorNotes(actorId, includeArchived = false) {
-    const notes = this._actorNotes[actorId] || [];
+  _getActorNotes(actorOrId, includeArchived = false) {
+    const actor = typeof actorOrId === "string" ? game.actors.get(actorOrId) : actorOrId;
+    if (!actor) return [];
+    const notes = actor.getFlag("cypher-gm-taskbar", "actorNotes") || [];
     if (includeArchived) return notes;
     return notes.filter(n => !n.archived);
   }
 
-  async _addActorNote(actorId, note) {
-    if (!this._actorNotes[actorId]) this._actorNotes[actorId] = [];
-    this._actorNotes[actorId].push({
-      text: note,
+  async _addActorNote(actorId, noteText) {
+    const actor = game.actors.get(actorId);
+    if (!actor || !noteText?.trim()) return;
+    const notes = this._getActorNotes(actor, true);
+    notes.push({
+      id: foundry.utils.randomID(8),
+      text: noteText.trim(),
       time: new Date().toLocaleTimeString(),
       date: new Date().toLocaleDateString(),
+      timestamp: Date.now(),
       archived: false
     });
-    console.log(`${MODULE_ID} | Adding note for ${actorId}:`, note);
-    await this._saveActorNotes();
+    await actor.setFlag("cypher-gm-taskbar", "actorNotes", notes);
+    console.log(`${MODULE_ID} | Note added for ${actor.name}:`, noteText.trim());
   }
 
-  async _deleteActorNote(actorId, index) {
-    if (this._actorNotes[actorId]) {
-      this._actorNotes[actorId].splice(index, 1);
-      if (this._actorNotes[actorId].length === 0) delete this._actorNotes[actorId];
-      console.log(`${MODULE_ID} | Deleted note ${index} for ${actorId}`);
-      await this._saveActorNotes();
-    }
+  async _deleteActorNote(actorId, noteId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    let notes = this._getActorNotes(actor, true);
+    notes = notes.filter(n => n.id !== noteId);
+    await actor.setFlag("cypher-gm-taskbar", "actorNotes", notes);
+    console.log(`${MODULE_ID} | Note deleted for ${actor.name}:`, noteId);
   }
 
-  async _archiveActorNote(actorId, index) {
-    if (this._actorNotes[actorId] && this._actorNotes[actorId][index]) {
-      this._actorNotes[actorId][index].archived = true;
-      console.log(`${MODULE_ID} | Archived note ${index} for ${actorId}`);
-      await this._saveActorNotes();
+  async _archiveActorNote(actorId, noteId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const notes = this._getActorNotes(actor, true);
+    const note = notes.find(n => n.id === noteId);
+    if (note) {
+      note.archived = true;
+      await actor.setFlag("cypher-gm-taskbar", "actorNotes", notes);
+      console.log(`${MODULE_ID} | Note archived for ${actor.name}:`, noteId);
     }
   }
 
@@ -887,6 +988,22 @@ ${paths}  </svg>
     `;
   }
 
+  /* ─── Recovery Drops — display only, below XP circle ── */
+  _buildRecoveryDrops(recoveryRolls) {
+    const rollArr = Array.isArray(recoveryRolls) ? recoveryRolls.slice(0, 4) : [true, true, true, true];
+    const defs = [
+      { label: "Recovery 1 — 1 Action" },
+      { label: "Recovery 2 — 10 Minutes" },
+      { label: "Recovery 3 — 1 Hour" },
+      { label: "Recovery 4 — 10 Hours" }
+    ];
+    const drops = rollArr.map((available, idx) => {
+      const isAvailable = available === true || Number(available) > 0;
+      return `<span class="cgm-recovery-drop${isAvailable ? '' : ' spent'}" title="${defs[idx].label}"><i class="fas fa-tint"></i></span>`;
+    }).join("");
+    return `<div class="cgm-recovery-bar">${drops}</div>`;
+  }
+
   /* ─── Radial Menu ─── */
 
   _pieWedgePath(startAngle, endAngle, innerR, outerR) {
@@ -923,7 +1040,7 @@ ${paths}  </svg>
       { action: "notes",      icon: "fa-sticky-note", label: "Notes", isNotes: true },
       { action: "target",     icon: "fa-crosshairs",  label: "Target", isTarget: true },
       { action: "callforroll",icon: "fa-dice-d20",    label: "Call Roll", isCallForRoll: true },
-      { action: "damage",     icon: "fa-skull",       label: "Damage", isDamage: true },
+      { action: "values",     icon: "fa-coins",       label: "Values", isValues: true },
       { action: "recovery",   icon: "fa-bed",         label: "Rest", isRecovery: true },
       { action: "cyphers",    icon: "fa-flask",       label: "Cyphers", isCyphers: true },
       { action: "pools",      icon: "fa-water",       label: "Pools", isPools: true },
@@ -943,7 +1060,7 @@ ${paths}  </svg>
       else if (seg.isStatus) specialClass = "cgm-pie-seg-status";
       else if (seg.isNotes) specialClass = "cgm-pie-seg-notes";
       else if (seg.isTarget) specialClass = "cgm-pie-seg-target";
-      else if (seg.isDamage) specialClass = "cgm-pie-seg-damage";
+      else if (seg.isValues) specialClass = "cgm-pie-seg-values";
       else if (seg.isRecovery) specialClass = "cgm-pie-seg-recovery";
       else if (seg.isCyphers) specialClass = "cgm-pie-seg-cyphers";
       else if (seg.isCallForRoll) specialClass = "cgm-pie-seg-callforroll";
@@ -964,7 +1081,7 @@ ${paths}  </svg>
       else if (seg.isStatus) specialLabelClass = "cgm-pie-label-status";
       else if (seg.isNotes) specialLabelClass = "cgm-pie-label-notes";
       else if (seg.isTarget) specialLabelClass = "cgm-pie-label-target";
-      else if (seg.isDamage) specialLabelClass = "cgm-pie-label-damage";
+      else if (seg.isValues) specialLabelClass = "cgm-pie-label-values";
       else if (seg.isRecovery) specialLabelClass = "cgm-pie-label-recovery";
       else if (seg.isCyphers) specialLabelClass = "cgm-pie-label-cyphers";
       labelsHtml += `
@@ -1060,8 +1177,8 @@ ${paths}  </svg>
         this._showNotesSubMenu(id, wrapEl);
       } else if (action === "target") {
         this._showTargetSubMenu(id, wrapEl);
-      } else if (action === "damage") {
-        this._showDamageSubMenu(id, wrapEl);
+      } else if (action === "values") {
+        this._showValuesSubMenu(id, wrapEl);
       } else if (action === "recovery") {
         this._showRecoverySubMenu(id, wrapEl);
       } else if (action === "cyphers") {
@@ -1135,7 +1252,7 @@ ${paths}  </svg>
     this._hideDfredsEffectsPicker();
     this._hideNotesSubMenu();
     this._hideTargetSubMenu();
-    this._hideDamageSubMenu();
+    this._hideValuesSubMenu();
     this._hideRecoverySubMenu();
     this._hideCyphersSubMenu();
     this._hideCallForRollSubMenu();
@@ -1323,6 +1440,1025 @@ ${paths}  </svg>
       this._gmGroupRollMenuEl.classList.remove("cgm-radial-visible");
       setTimeout(() => { this._gmGroupRollMenuEl?.remove(); this._gmGroupRollMenuEl = null; }, 200);
     }
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     TASKBAR RECOVERY MENU — ONE / FULL for all party actors
+     ═══════════════════════════════════════════════════════════ */
+
+  _showRecoveryTaskbarMenu(btnEl) {
+    this._hideRecoveryTaskbarMenu();
+
+    const size = this._radialMenuSize;
+    const offset = this._radialMenuOffset;
+    const segCount = 2;
+    const gap = 2;
+    const outerR = size / 2 - 6;
+    const innerR = outerR * 0.38;
+    const half = size / 2;
+
+    const segments = [
+      { action: "oneRecovery",  icon: "fa-tint", label: "ONE",  isOne: true },
+      { action: "fullRecovery", icon: "fa-droplet", label: "FULL", isFull: true },
+    ];
+
+    let svgPaths = "";
+    segments.forEach((seg, i) => {
+      const startAngle = i * (360 / segCount) + gap / 2;
+      const endAngle = (i + 1) * (360 / segCount) - gap / 2;
+      const d = this._pieWedgePath(startAngle, endAngle, innerR, outerR);
+      let specialClass = "";
+      if (seg.isOne) specialClass = "cgm-pie-seg-recovery-one";
+      else if (seg.isFull) specialClass = "cgm-pie-seg-recovery-full";
+      svgPaths += `<path class="cgm-pie-seg ${specialClass}" data-action="${seg.action}" d="${d}" />`;
+    });
+
+    let labelsHtml = "";
+    segments.forEach((seg, i) => {
+      const midAngle = (i * (360 / segCount) + ((i + 1) * (360 / segCount))) / 2;
+      const rad = (midAngle - 90) * Math.PI / 180;
+      const labelR = (innerR + outerR) / 2;
+      const lx = Math.cos(rad) * labelR + half;
+      const ly = Math.sin(rad) * labelR + half;
+      let specialLabelClass = "";
+      if (seg.isOne) specialLabelClass = "cgm-pie-label-recovery-one";
+      else if (seg.isFull) specialLabelClass = "cgm-pie-label-recovery-full";
+      labelsHtml += `
+        <div class="cgm-pie-label ${specialLabelClass}" data-action="${seg.action}"
+             style="left:${lx.toFixed(1)}px;top:${ly.toFixed(1)}px;">
+          <i class="fas ${seg.icon}"></i>
+          <span>${seg.label}</span>
+        </div>
+      `;
+    });
+
+    const menu = document.createElement("div");
+    menu.className = "cgm-radial-menu cgm-recovery-menu";
+    menu.style.width = `${size}px`;
+    menu.style.height = `${size}px`;
+
+    const rect = btnEl.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) {
+      console.warn("Cypher GM Taskbar: Recovery button rect is empty");
+      return;
+    }
+    const btnCx = rect.left + rect.width / 2;
+    const btnCy = rect.top + rect.height / 2;
+
+    const spaceAbove = btnCy - size / 2;
+    const spaceBelow = window.innerHeight - btnCy - size / 2;
+    let menuLeft = btnCx - size / 2;
+    let menuTop;
+    if (spaceAbove >= size + offset && spaceAbove >= spaceBelow) {
+      menuTop = rect.top - size - offset;
+    } else if (spaceBelow >= size + offset) {
+      menuTop = rect.bottom + offset;
+    } else if (spaceAbove >= size + offset) {
+      menuTop = rect.top - size - offset;
+    } else {
+      menuTop = (window.innerHeight - size) / 2;
+    }
+
+    menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - size - 8));
+    menuTop = Math.max(8, Math.min(menuTop, window.innerHeight - size - 8));
+
+    menu.style.left = `${menuLeft}px`;
+    menu.style.top = `${menuTop}px`;
+
+    menu.innerHTML = `
+      <svg class="cgm-pie-svg" viewBox="-${half} -${half} ${size} ${size}" width="${size}" height="${size}">
+        <defs>
+          <radialGradient id="cgm-pie-bg" cx="0" cy="0" r="${outerR}">
+            <stop offset="0%" stop-color="rgba(20,22,35,0.3)" />
+            <stop offset="100%" stop-color="rgba(15,17,30,0.95)" />
+          </radialGradient>
+        </defs>
+        <circle cx="0" cy="0" r="${outerR}" fill="url(#cgm-pie-bg)" stroke="rgba(59,130,246,0.3)" stroke-width="1" />
+        ${svgPaths}
+        <circle cx="0" cy="0" r="${innerR - 2}" fill="rgba(15,17,30,0.98)" stroke="rgba(59,130,246,0.4)" stroke-width="1.5" />
+      </svg>
+      ${labelsHtml}
+      <div class="cgm-pie-portrait" style="background:rgba(30,33,52,0.95);display:grid;place-items:center;">
+        <i class="fas fa-droplet" style="font-size:28px;color:#3b82f6;"></i>
+      </div>
+    `;
+
+    document.body.appendChild(menu);
+    this._recoveryTaskbarMenuEl = menu;
+    requestAnimationFrame(() => menu.classList.add("cgm-radial-visible"));
+
+    const onSegClick = (e) => {
+      e.stopPropagation();
+      const action = e.currentTarget.dataset.action;
+      this._hideRecoveryTaskbarMenu();
+      if (action === "oneRecovery") this._doOneRecoveryAll();
+      else if (action === "fullRecovery") this._doFullRecoveryAll();
+    };
+    menu.querySelectorAll(".cgm-pie-seg, .cgm-pie-label").forEach(el => {
+      el.addEventListener("click", onSegClick);
+    });
+
+    // Hover sync
+    menu.querySelectorAll(".cgm-pie-seg").forEach(seg => {
+      const action = seg.dataset.action;
+      const label = menu.querySelector(`.cgm-pie-label[data-action="${action}"]`);
+      seg.addEventListener("mouseenter", () => label?.classList.add("cgm-pie-label-active"));
+      seg.addEventListener("mouseleave", () => label?.classList.remove("cgm-pie-label-active"));
+    });
+    menu.querySelectorAll(".cgm-pie-label").forEach(lbl => {
+      const action = lbl.dataset.action;
+      const seg = menu.querySelector(`.cgm-pie-seg[data-action="${action}"]`);
+      lbl.addEventListener("mouseenter", () => seg?.classList.add("cgm-pie-seg-hover"));
+      lbl.addEventListener("mouseleave", () => seg?.classList.remove("cgm-pie-seg-hover"));
+    });
+
+    const closeHandler = (e) => {
+      if (!menu.contains(e.target) && e.target !== btnEl) {
+        this._hideRecoveryTaskbarMenu();
+        document.removeEventListener("click", closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeHandler), 10);
+  }
+
+  _hideRecoveryTaskbarMenu() {
+    if (this._recoveryTaskbarMenuEl) {
+      this._recoveryTaskbarMenuEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._recoveryTaskbarMenuEl?.remove(); this._recoveryTaskbarMenuEl = null; }, 200);
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════
+     REPUTATION PANEL
+     ═══════════════════════════════════════════════════════════════ */
+  _toggleReputationPanel(btnEl) {
+    if (this._reputationPanelEl) {
+      this._hideReputationPanel();
+      return;
+    }
+    this._showReputationPanel(btnEl);
+  }
+
+  _hideReputationPanel() {
+    if (this._reputationPanelEl) {
+      this._reputationPanelEl.classList.remove("cgm-reputation-visible");
+      setTimeout(() => {
+        this._reputationPanelEl?.remove();
+        this._reputationPanelEl = null;
+      }, 200);
+    }
+  }
+
+  async _showReputationPanel(btnEl) {
+    this._hideReputationPanel();
+
+    const panelW = 460;
+    const panelH = 420;
+
+    // Position below the button
+    const rect = btnEl.getBoundingClientRect();
+    let panelLeft = rect.left + rect.width / 2 - panelW / 2;
+    let panelTop = rect.bottom + 8;
+
+    // Clamp to viewport
+    panelLeft = Math.max(8, Math.min(panelLeft, window.innerWidth - panelW - 8));
+    const spaceBelow = window.innerHeight - rect.bottom - 8;
+    if (spaceBelow < panelH && rect.top > panelH + 16) {
+      panelTop = rect.top - panelH - 8;
+    }
+    panelTop = Math.max(8, Math.min(panelTop, window.innerHeight - panelH - 8));
+
+    // Load saved position if available
+    if (this._reputationPanelPos) {
+      const clamped = this._clampPanelPos(this._reputationPanelPos.left, this._reputationPanelPos.top, panelW, panelH);
+      panelLeft = clamped.left;
+      panelTop = clamped.top;
+      this._reputationPanelPos = clamped;
+    }
+
+    const panel = document.createElement("div");
+    panel.className = "cgm-reputation-panel";
+    panel.style.cssText = `position:fixed;left:${panelLeft}px;top:${panelTop}px;width:${panelW}px;height:${panelH}px;z-index:202;`;
+
+    // Get all PCs
+    const pcs = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).sort((a, b) => a.name.localeCompare(b.name));
+
+    // Build tabs: ALL + one per actor (first name only)
+    const tabsHtml = `
+      <div class="cgm-reputation-tabs">
+        <button class="cgm-reputation-tab cgm-reputation-tab-active" data-rep-tab="all">ALL</button>
+        ${pcs.map(pc => `<button class="cgm-reputation-tab" data-rep-tab="${pc.id}">${pc.name.split(' ')[0]}</button>`).join("")}
+      </div>
+    `;
+
+    panel.innerHTML = `
+      <div class="cgm-reputation-header">
+        <i class="fas fa-handshake"></i>
+        <span>Reputation and gossips</span>
+        <button class="cgm-reputation-close"><i class="fas fa-xmark"></i></button>
+      </div>
+      ${tabsHtml}
+      <div class="cgm-reputation-body">
+        <div class="cgm-reputation-content" data-rep-content="all">
+          ${this._buildReputationTabContent(null, pcs)}
+          ${this._buildGossipTabContent(null, pcs)}
+        </div>
+        ${pcs.map(pc => `
+          <div class="cgm-reputation-content" data-rep-content="${pc.id}" style="display:none;">
+            ${this._buildReputationTabContent(pc.id, pcs)}
+            ${this._buildGossipTabContent(pc.id, pcs)}
+          </div>
+        `).join("")}
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    this._reputationPanelEl = panel;
+    requestAnimationFrame(() => panel.classList.add("cgm-reputation-visible"));
+
+    // Close button
+    panel.querySelector(".cgm-reputation-close")?.addEventListener("click", () => {
+      this._hideReputationPanel();
+    });
+
+    // Tab switching
+    panel.querySelectorAll("[data-rep-tab]").forEach(tab => {
+      tab.addEventListener("click", () => {
+        const tabKey = tab.dataset.repTab;
+        panel.querySelectorAll(".cgm-reputation-tab").forEach(t => t.classList.remove("cgm-reputation-tab-active"));
+        tab.classList.add("cgm-reputation-tab-active");
+        panel.querySelectorAll("[data-rep-content]").forEach(c => c.style.display = c.dataset.repContent === tabKey ? "" : "none");
+      });
+    });
+
+    // Add reputation button
+    panel.querySelectorAll("[data-rep-add]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const actorId = btn.dataset.repAdd || null;
+        await this._showAddReputationDialog(actorId, pcs);
+      });
+    });
+
+    // Delete reputation
+    panel.querySelectorAll("[data-rep-delete]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const actorId = btn.dataset.repDelete;
+        const repId = btn.dataset.repId;
+        await this._deleteReputation(actorId, repId);
+      });
+    });
+
+    // Toggle hide/show reputation
+    panel.querySelectorAll("[data-rep-eye]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const actorId = btn.dataset.repEye;
+        const repId = btn.dataset.repId;
+        await this._toggleReputationHidden(actorId, repId);
+      });
+    });
+
+    // Score +/- buttons
+    panel.querySelectorAll("[data-rep-minus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const actorId = btn.dataset.repMinus;
+        const repId = btn.dataset.repId;
+        await this._changeReputationScore(actorId, repId, -1);
+      });
+    });
+    panel.querySelectorAll("[data-rep-plus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const actorId = btn.dataset.repPlus;
+        const repId = btn.dataset.repId;
+        await this._changeReputationScore(actorId, repId, 1);
+      });
+    });
+
+    // === GOSSIP EVENTS ===
+    // Add gossip button
+    panel.querySelectorAll("[data-gossip-add]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const actorId = btn.dataset.gossipAdd || null;
+        await this._showAddGossipDialog(actorId, pcs);
+      });
+    });
+    // Delete gossip
+    panel.querySelectorAll("[data-gossip-delete]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._deleteGossip(btn.dataset.gossipDelete, btn.dataset.gossipId);
+      });
+    });
+    // Toggle gossip known/unknown
+    panel.querySelectorAll("[data-gossip-eye]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._toggleGossipKnown(btn.dataset.gossipEye, btn.dataset.gossipId);
+      });
+    });
+    // Gossip score +/-
+    panel.querySelectorAll("[data-gossip-minus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._changeGossipScore(btn.dataset.gossipMinus, btn.dataset.gossipId, -1);
+      });
+    });
+    panel.querySelectorAll("[data-gossip-plus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._changeGossipScore(btn.dataset.gossipPlus, btn.dataset.gossipId, 1);
+      });
+    });
+
+    // Make draggable
+    const header = panel.querySelector(".cgm-reputation-header");
+    if (header) {
+      let isDragging = false, startX, startY, startLeft, startTop;
+      header.addEventListener("mousedown", (e) => {
+        if (e.target.closest("button")) return;
+        isDragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        const r = panel.getBoundingClientRect();
+        startLeft = r.left;
+        startTop = r.top;
+        panel.style.transition = "none";
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        let nl = startLeft + dx;
+        let nt = startTop + dy;
+        const r = panel.getBoundingClientRect();
+        nl = Math.max(0, Math.min(nl, window.innerWidth - r.width));
+        nt = Math.max(0, Math.min(nt, window.innerHeight - r.height));
+        panel.style.left = `${nl}px`;
+        panel.style.top = `${nt}px`;
+      });
+      document.addEventListener("mouseup", () => {
+        if (!isDragging) return;
+        isDragging = false;
+        panel.style.transition = "";
+        const r = panel.getBoundingClientRect();
+        this._reputationPanelPos = { left: r.left, top: r.top };
+      });
+    }
+
+    // Close only via close button — panel stays open until explicitly closed
+  }
+
+  _buildReputationTabContent(actorId, pcs) {
+    let entries = [];
+    if (actorId) {
+      const actor = game.actors.get(actorId);
+      if (actor) {
+        const reps = actor.getFlag("cypher-gm-taskbar", "reputations") || [];
+        entries = reps.map(r => ({ ...r, actorId, actorName: actor.name }));
+      }
+    } else {
+      // ALL tab - show all reputations grouped by actor
+      for (const pc of pcs) {
+        const reps = pc.getFlag("cypher-gm-taskbar", "reputations") || [];
+        entries.push(...reps.map(r => ({ ...r, actorId: pc.id, actorName: pc.name })));
+      }
+    }
+
+    if (!entries.length) {
+      return `
+        <div class="cgm-reputation-empty">
+          <i class="fas fa-handshake"></i>
+          <span>No reputations yet.</span>
+          <button class="cgm-reputation-add-btn" data-rep-add="${actorId || ''}"><i class="fas fa-plus"></i> Add Reputation</button>
+        </div>
+      `;
+    }
+
+    const rows = entries.map(rep => {
+      const scoreColor = rep.score < 0 ? "cgm-reputation-negative" : rep.score > 0 ? "cgm-reputation-positive" : "cgm-reputation-neutral";
+      const scoreSign = rep.score > 0 ? `+${rep.score}` : rep.score;
+      const actorLabel = actorId ? "" : `<div class="cgm-reputation-actor">${rep.actorName}</div>`;
+      const hiddenClass = rep.hidden ? "cgm-reputation-hidden" : "";
+      const eyeIcon = rep.hidden ? "fa-eye-slash" : "fa-eye";
+      const eyeTitle = rep.hidden ? "Hidden from actor" : "Visible to actor";
+      return `
+        <div class="cgm-reputation-row ${hiddenClass}">
+          <div class="cgm-reputation-info">
+            ${actorLabel}
+            <div class="cgm-reputation-name">${foundry.utils.escapeHTML(rep.name)}</div>
+            <div class="cgm-reputation-type">${foundry.utils.escapeHTML(rep.repType || "Neutral")}</div>
+          </div>
+          <div class="cgm-reputation-controls">
+            <button class="cgm-reputation-score-btn" data-rep-minus="${rep.actorId}" data-rep-id="${rep.id}" title="-1"><i class="fas fa-minus"></i></button>
+            <div class="cgm-reputation-score ${scoreColor}">${scoreSign}</div>
+            <button class="cgm-reputation-score-btn" data-rep-plus="${rep.actorId}" data-rep-id="${rep.id}" title="+1"><i class="fas fa-plus"></i></button>
+            <button class="cgm-reputation-eye" data-rep-eye="${rep.actorId}" data-rep-id="${rep.id}" title="${eyeTitle}"><i class="fas ${eyeIcon}"></i></button>
+            <button class="cgm-reputation-delete" data-rep-delete="${rep.actorId}" data-rep-id="${rep.id}" title="Delete"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="cgm-reputation-list">
+        ${rows}
+      </div>
+      <button class="cgm-reputation-add-btn" data-rep-add="${actorId || ''}"><i class="fas fa-plus"></i> Add Reputation</button>
+    `;
+  }
+
+  async _showAddReputationDialog(actorId, pcs) {
+    const actorsForSelect = actorId
+      ? [{ id: actorId, name: game.actors.get(actorId)?.name || "Unknown" }]
+      : pcs.map(pc => ({ id: pc.id, name: pc.name }));
+
+    const selectHtml = actorsForSelect.length > 1
+      ? `<div class="cgm-rep-dialog-row"><label>Actor</label><select id="cgm-rep-actor" class="cgm-rep-dialog-input">${actorsForSelect.map(a => `<option value="${a.id}">${a.name}</option>`).join("")}</select></div>`
+      : `<input type="hidden" id="cgm-rep-actor" value="${actorsForSelect[0]?.id || ''}">`;
+
+    // Create fancy custom dialog overlay
+    const overlay = document.createElement("div");
+    overlay.className = "cgm-rep-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="cgm-rep-dialog">
+        <div class="cgm-rep-dialog-header">
+          <i class="fas fa-handshake"></i>
+          <span>Add Reputation</span>
+          <button class="cgm-rep-dialog-close" data-rep-dialog-close><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="cgm-rep-dialog-body">
+          ${selectHtml}
+          <div class="cgm-rep-dialog-row">
+            <label>Name</label>
+            <input type="text" id="cgm-rep-name" class="cgm-rep-dialog-input" placeholder="e.g. Town of Cresthaven" maxlength="80">
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Reputation</label>
+            <input type="text" id="cgm-rep-type" class="cgm-rep-dialog-input" placeholder="e.g. Friendly, Hostile, Neutral" maxlength="60">
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Score (-2 to +2)</label>
+            <div class="cgm-rep-dialog-score-wrap">
+              <button class="cgm-rep-dialog-score-btn" data-rep-dialog-minus><i class="fas fa-minus"></i></button>
+              <input type="number" id="cgm-rep-score" class="cgm-rep-dialog-score-input" value="0" min="-2" max="2" readonly>
+              <button class="cgm-rep-dialog-score-btn" data-rep-dialog-plus><i class="fas fa-plus"></i></button>
+            </div>
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Description <span class="cgm-rep-dialog-char-count">0 / 1000</span></label>
+            <textarea id="cgm-rep-desc" class="cgm-rep-dialog-textarea" placeholder="Enter reputation details, notes, or history... (up to 1000 characters)" maxlength="1000" rows="4"></textarea>
+          </div>
+        </div>
+        <div class="cgm-rep-dialog-footer">
+          <button class="cgm-rep-dialog-btn cgm-rep-dialog-btn-secondary" data-rep-dialog-cancel>
+            <i class="fas fa-xmark"></i> Cancel
+          </button>
+          <button class="cgm-rep-dialog-btn cgm-rep-dialog-btn-primary" data-rep-dialog-add>
+            <i class="fas fa-plus"></i> Add Reputation
+          </button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add("cgm-rep-dialog-visible"));
+
+    const nameInput = overlay.querySelector("#cgm-rep-name");
+    const scoreInput = overlay.querySelector("#cgm-rep-score");
+    const descInput = overlay.querySelector("#cgm-rep-desc");
+    const charCount = overlay.querySelector(".cgm-rep-dialog-char-count");
+
+    // Focus name input
+    setTimeout(() => nameInput?.focus(), 50);
+
+    // Character counter
+    descInput?.addEventListener("input", () => {
+      if (charCount) charCount.textContent = `${descInput.value.length} / 1000`;
+    });
+
+    // Score +/- in dialog
+    overlay.querySelector("[data-rep-dialog-minus]")?.addEventListener("click", () => {
+      const val = parseInt(scoreInput.value, 10) || 0;
+      scoreInput.value = Math.max(-2, val - 1);
+    });
+    overlay.querySelector("[data-rep-dialog-plus]")?.addEventListener("click", () => {
+      const val = parseInt(scoreInput.value, 10) || 0;
+      scoreInput.value = Math.min(2, val + 1);
+    });
+
+    // Close / Cancel
+    const closeDialog = () => {
+      overlay.classList.remove("cgm-rep-dialog-visible");
+      setTimeout(() => overlay.remove(), 250);
+    };
+
+    overlay.querySelector("[data-rep-dialog-close]")?.addEventListener("click", closeDialog);
+    overlay.querySelector("[data-rep-dialog-cancel]")?.addEventListener("click", closeDialog);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeDialog();
+    });
+
+    // Add
+    overlay.querySelector("[data-rep-dialog-add]")?.addEventListener("click", async () => {
+      const targetActorId = overlay.querySelector("#cgm-rep-actor")?.value || actorId;
+      const name = nameInput?.value.trim();
+      const repType = overlay.querySelector("#cgm-rep-type")?.value.trim() || "Neutral";
+      const score = parseInt(scoreInput?.value, 10) || 0;
+      const description = descInput?.value.trim() || "";
+      if (!name || !targetActorId) {
+        ui.notifications.warn("Please enter a reputation name.");
+        return;
+      }
+      closeDialog();
+      await this._addReputation(targetActorId, name, repType, Math.max(-2, Math.min(2, score)), description);
+    });
+  }
+
+  async _addReputation(actorId, name, repType, score, description = "") {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const reps = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "reputations") || []);
+    reps.push({
+      id: foundry.utils.randomID(),
+      name,
+      repType,
+      score: Math.max(-2, Math.min(2, score)),
+      description: description.substring(0, 1000),
+      hidden: false
+    });
+    await actor.setFlag("cypher-gm-taskbar", "reputations", reps);
+    this._refreshReputationPanel();
+    ui.notifications.info(`Reputation "${name}" added to ${actor.name}.`);
+  }
+
+  async _deleteReputation(actorId, repId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const reps = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "reputations") || []);
+    const idx = reps.findIndex(r => r.id === repId);
+    if (idx >= 0) {
+      const name = reps[idx].name;
+      reps.splice(idx, 1);
+      await actor.setFlag("cypher-gm-taskbar", "reputations", reps);
+      this._refreshReputationPanel();
+      ui.notifications.info(`Reputation "${name}" removed from ${actor.name}.`);
+    }
+  }
+
+  async _changeReputationScore(actorId, repId, delta) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const reps = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "reputations") || []);
+    const rep = reps.find(r => r.id === repId);
+    if (!rep) return;
+    const newScore = Math.max(-2, Math.min(2, rep.score + delta));
+    if (newScore === rep.score) return;
+    rep.score = newScore;
+    await actor.setFlag("cypher-gm-taskbar", "reputations", reps);
+    this._refreshReputationPanel();
+  }
+
+  async _toggleReputationHidden(actorId, repId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const reps = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "reputations") || []);
+    const rep = reps.find(r => r.id === repId);
+    if (!rep) return;
+    rep.hidden = !rep.hidden;
+    await actor.setFlag("cypher-gm-taskbar", "reputations", reps);
+    this._refreshReputationPanel();
+    const status = rep.hidden ? "hidden" : "visible";
+    ui.notifications.info(`Reputation "${rep.name}" is now ${status} to ${actor.name}.`);
+  }
+
+  _refreshReputationPanel() {
+    if (!this._reputationPanelEl) return;
+    const pcs = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).sort((a, b) => a.name.localeCompare(b.name));
+    const activeTab = this._reputationPanelEl.querySelector(".cgm-reputation-tab-active")?.dataset.repTab || "all";
+
+    // Refresh each tab content (reputation + gossip)
+    this._reputationPanelEl.querySelectorAll("[data-rep-content]").forEach(content => {
+      const actorId = content.dataset.repContent === "all" ? null : content.dataset.repContent;
+      content.innerHTML = this._buildReputationTabContent(actorId, pcs) + this._buildGossipTabContent(actorId, pcs);
+    });
+
+    // Re-bind reputation events
+    this._reputationPanelEl.querySelectorAll("[data-rep-add]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const aid = btn.dataset.repAdd || null;
+        await this._showAddReputationDialog(aid, pcs);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-rep-delete]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._deleteReputation(btn.dataset.repDelete, btn.dataset.repId);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-rep-minus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._changeReputationScore(btn.dataset.repMinus, btn.dataset.repId, -1);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-rep-plus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._changeReputationScore(btn.dataset.repPlus, btn.dataset.repId, 1);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-rep-eye]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._toggleReputationHidden(btn.dataset.repEye, btn.dataset.repId);
+      });
+    });
+
+    // Re-bind gossip events
+    this._reputationPanelEl.querySelectorAll("[data-gossip-add]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const aid = btn.dataset.gossipAdd || null;
+        await this._showAddGossipDialog(aid, pcs);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-gossip-delete]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._deleteGossip(btn.dataset.gossipDelete, btn.dataset.gossipId);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-gossip-minus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._changeGossipScore(btn.dataset.gossipMinus, btn.dataset.gossipId, -1);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-gossip-plus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._changeGossipScore(btn.dataset.gossipPlus, btn.dataset.gossipId, 1);
+      });
+    });
+    this._reputationPanelEl.querySelectorAll("[data-gossip-eye]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await this._toggleGossipKnown(btn.dataset.gossipEye, btn.dataset.gossipId);
+      });
+    });
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     GOSSIP SYSTEM
+     ═══════════════════════════════════════════════════════════ */
+
+  _buildGossipTabContent(actorId, pcs) {
+    let entries = [];
+    if (actorId) {
+      const actor = game.actors.get(actorId);
+      if (actor) {
+        const gossips = actor.getFlag("cypher-gm-taskbar", "gossips") || [];
+        entries = gossips.map(g => ({ ...g, actorId, actorName: actor.name }));
+      }
+    } else {
+      for (const pc of pcs) {
+        const gossips = pc.getFlag("cypher-gm-taskbar", "gossips") || [];
+        entries.push(...gossips.map(g => ({ ...g, actorId: pc.id, actorName: pc.name })));
+      }
+    }
+
+    const rows = entries.map(g => {
+      const actorLabel = actorId ? "" : `<div class="cgm-gossip-actor">${g.actorName}</div>`;
+      const knownClass = g.known ? "cgm-gossip-known" : "cgm-gossip-unknown";
+      const eyeIcon = g.known ? "fa-eye" : "fa-eye-slash";
+      const eyeTitle = g.known ? "Known to actor" : "Unknown to actor";
+      const scoreSign = g.score < 0 ? `${g.score}` : `-${g.score}`;
+      return `
+        <div class="cgm-gossip-row ${knownClass}">
+          <div class="cgm-gossip-info">
+            ${actorLabel}
+            <div class="cgm-gossip-name">${foundry.utils.escapeHTML(g.name)}</div>
+            <div class="cgm-gossip-source">Source: ${foundry.utils.escapeHTML(g.source || "Unknown")}</div>
+            <div class="cgm-gossip-group">Group: ${foundry.utils.escapeHTML(g.group || "—")}</div>
+          </div>
+          <div class="cgm-gossip-controls">
+            <button class="cgm-gossip-score-btn" data-gossip-minus="${g.actorId}" data-gossip-id="${g.id}" title="-1"><i class="fas fa-minus"></i></button>
+            <div class="cgm-gossip-score">${scoreSign}</div>
+            <button class="cgm-gossip-score-btn" data-gossip-plus="${g.actorId}" data-gossip-id="${g.id}" title="+1"><i class="fas fa-plus"></i></button>
+            <button class="cgm-gossip-eye" data-gossip-eye="${g.actorId}" data-gossip-id="${g.id}" title="${eyeTitle}"><i class="fas ${eyeIcon}"></i></button>
+            <button class="cgm-gossip-delete" data-gossip-delete="${g.actorId}" data-gossip-id="${g.id}" title="Delete"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="cgm-gossip-section">
+        <div class="cgm-gossip-header">
+          <i class="fas fa-comments"></i>
+          <span>Gossips</span>
+        </div>
+        ${entries.length ? `<div class="cgm-gossip-list">${rows}</div>` : `<div class="cgm-gossip-empty">No gossips yet.</div>`}
+        <button class="cgm-gossip-add-btn" data-gossip-add="${actorId || ''}"><i class="fas fa-plus"></i> Add Gossip</button>
+      </div>
+    `;
+  }
+
+  async _showAddGossipDialog(actorId, pcs) {
+    const actorsForSelect = actorId
+      ? [{ id: actorId, name: game.actors.get(actorId)?.name || "Unknown" }]
+      : pcs.map(pc => ({ id: pc.id, name: pc.name }));
+
+    const selectHtml = actorsForSelect.length > 1
+      ? `<div class="cgm-rep-dialog-row"><label>Actor</label><select id="cgm-gossip-actor" class="cgm-rep-dialog-input">${actorsForSelect.map(a => `<option value="${a.id}">${a.name}</option>`).join("")}</select></div>`
+      : `<input type="hidden" id="cgm-gossip-actor" value="${actorsForSelect[0]?.id || ''}">`;
+
+    const overlay = document.createElement("div");
+    overlay.className = "cgm-rep-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="cgm-rep-dialog cgm-gossip-dialog">
+        <div class="cgm-rep-dialog-header">
+          <i class="fas fa-comments"></i>
+          <span>Add Gossip</span>
+          <button class="cgm-rep-dialog-close" data-gossip-dialog-close><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="cgm-rep-dialog-body">
+          ${selectHtml}
+          <div class="cgm-rep-dialog-row">
+            <label>Gossip Name</label>
+            <input type="text" id="cgm-gossip-name" class="cgm-rep-dialog-input" placeholder="e.g. The Duke's Secret" maxlength="80">
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Source</label>
+            <input type="text" id="cgm-gossip-source" class="cgm-rep-dialog-input" placeholder="e.g. Tavern drunk, Street urchin..." maxlength="60">
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Group Influenced</label>
+            <input type="text" id="cgm-gossip-group" class="cgm-rep-dialog-input" placeholder="e.g. Townsfolk, Merchant Guild..." maxlength="60">
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Score (0 to -4)</label>
+            <div class="cgm-rep-dialog-score-wrap">
+              <button class="cgm-rep-dialog-score-btn" data-gossip-dialog-minus><i class="fas fa-minus"></i></button>
+              <input type="number" id="cgm-gossip-score" class="cgm-rep-dialog-score-input" value="0" min="-4" max="0" readonly>
+              <button class="cgm-rep-dialog-score-btn" data-gossip-dialog-plus><i class="fas fa-plus"></i></button>
+            </div>
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Description <span class="cgm-rep-dialog-char-count">0 / 1000</span></label>
+            <textarea id="cgm-gossip-desc" class="cgm-rep-dialog-textarea" placeholder="Enter gossip details..." maxlength="1000" rows="4"></textarea>
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label class="cgm-gossip-known-label">
+              <input type="checkbox" id="cgm-gossip-known" checked>
+              <span>Known to actor (visible to player)</span>
+            </label>
+          </div>
+        </div>
+        <div class="cgm-rep-dialog-footer">
+          <button class="cgm-rep-dialog-btn cgm-rep-dialog-btn-secondary" data-gossip-dialog-cancel>
+            <i class="fas fa-xmark"></i> Cancel
+          </button>
+          <button class="cgm-rep-dialog-btn cgm-rep-dialog-btn-primary" data-gossip-dialog-add>
+            <i class="fas fa-plus"></i> Add Gossip
+          </button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add("cgm-rep-dialog-visible"));
+
+    const nameInput = overlay.querySelector("#cgm-gossip-name");
+    const scoreInput = overlay.querySelector("#cgm-gossip-score");
+    const descInput = overlay.querySelector("#cgm-gossip-desc");
+    const charCount = overlay.querySelector(".cgm-rep-dialog-char-count");
+
+    setTimeout(() => nameInput?.focus(), 50);
+
+    descInput?.addEventListener("input", () => {
+      if (charCount) charCount.textContent = `${descInput.value.length} / 1000`;
+    });
+
+    overlay.querySelector("[data-gossip-dialog-minus]")?.addEventListener("click", () => {
+      const val = parseInt(scoreInput.value, 10) || 0;
+      scoreInput.value = Math.max(-4, val - 1);
+    });
+    overlay.querySelector("[data-gossip-dialog-plus]")?.addEventListener("click", () => {
+      const val = parseInt(scoreInput.value, 10) || 0;
+      scoreInput.value = Math.min(0, val + 1);
+    });
+
+    const closeDialog = () => {
+      overlay.classList.remove("cgm-rep-dialog-visible");
+      setTimeout(() => overlay.remove(), 250);
+    };
+
+    overlay.querySelector("[data-gossip-dialog-close]")?.addEventListener("click", closeDialog);
+    overlay.querySelector("[data-gossip-dialog-cancel]")?.addEventListener("click", closeDialog);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeDialog();
+    });
+
+    overlay.querySelector("[data-gossip-dialog-add]")?.addEventListener("click", async () => {
+      const targetActorId = overlay.querySelector("#cgm-gossip-actor")?.value || actorId;
+      const name = nameInput?.value.trim();
+      const source = overlay.querySelector("#cgm-gossip-source")?.value.trim() || "";
+      const group = overlay.querySelector("#cgm-gossip-group")?.value.trim() || "";
+      const score = parseInt(scoreInput?.value, 10) || 0;
+      const description = descInput?.value.trim() || "";
+      const known = overlay.querySelector("#cgm-gossip-known")?.checked ?? true;
+      if (!name || !targetActorId) {
+        ui.notifications.warn("Please enter a gossip name.");
+        return;
+      }
+      closeDialog();
+      await this._addGossip(targetActorId, name, source, group, Math.max(-4, Math.min(0, score)), description, known);
+    });
+  }
+
+  async _addGossip(actorId, name, source, group, score, description, known) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const gossips = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "gossips") || []);
+    gossips.push({
+      id: foundry.utils.randomID(),
+      name,
+      source: source || "Unknown",
+      group: group || "",
+      score: Math.max(-4, Math.min(0, score)),
+      description: description.substring(0, 1000),
+      known: known !== false
+    });
+    await actor.setFlag("cypher-gm-taskbar", "gossips", gossips);
+    this._refreshReputationPanel();
+    ui.notifications.info(`Gossip "${name}" added to ${actor.name}.`);
+  }
+
+  async _deleteGossip(actorId, gossipId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const gossips = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "gossips") || []);
+    const idx = gossips.findIndex(g => g.id === gossipId);
+    if (idx >= 0) {
+      const name = gossips[idx].name;
+      gossips.splice(idx, 1);
+      await actor.setFlag("cypher-gm-taskbar", "gossips", gossips);
+      this._refreshReputationPanel();
+      ui.notifications.info(`Gossip "${name}" removed from ${actor.name}.`);
+    }
+  }
+
+  async _changeGossipScore(actorId, gossipId, delta) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const gossips = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "gossips") || []);
+    const gossip = gossips.find(g => g.id === gossipId);
+    if (!gossip) return;
+    const newScore = Math.max(-4, Math.min(0, gossip.score + delta));
+    if (newScore === gossip.score) return;
+    gossip.score = newScore;
+    await actor.setFlag("cypher-gm-taskbar", "gossips", gossips);
+    this._refreshReputationPanel();
+  }
+
+  async _toggleGossipKnown(actorId, gossipId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const gossips = foundry.utils.deepClone(actor.getFlag("cypher-gm-taskbar", "gossips") || []);
+    const gossip = gossips.find(g => g.id === gossipId);
+    if (!gossip) return;
+    gossip.known = !gossip.known;
+    await actor.setFlag("cypher-gm-taskbar", "gossips", gossips);
+    this._refreshReputationPanel();
+    const status = gossip.known ? "known" : "unknown";
+    ui.notifications.info(`Gossip "${gossip.name}" is now ${status} to ${actor.name}.`);
+  }
+
+  async _doOneRecoveryAll() {
+    const pcs = this._getPartyData().map(pc => game.actors.get(pc.id)).filter(a => a);
+    if (!pcs.length) {
+      ui.notifications.warn("No active actors found for recovery.");
+      return;
+    }
+
+    let recoveredCount = 0;
+    const recoveredActors = [];
+
+    for (const actor of pcs) {
+      const sys = actor.system ?? {};
+      let rolls = null;
+      let rollsPath = null;
+
+      if (Array.isArray(sys.combat?.recoveries?.recoveryRolls)) {
+        rolls = [...sys.combat.recoveries.recoveryRolls];
+        rollsPath = "system.combat.recoveries.recoveryRolls";
+      } else if (Array.isArray(sys.recoveries?.recoveryRolls)) {
+        rolls = [...sys.recoveries.recoveryRolls];
+        rollsPath = "system.recoveries.recoveryRolls";
+      } else if (Array.isArray(sys.combat?.recoveryRolls)) {
+        rolls = [...sys.combat.recoveryRolls];
+        rollsPath = "system.combat.recoveryRolls";
+      }
+
+      let recovered = false;
+      let recoveredName = "";
+
+      if (rolls) {
+        // Check in order: 10 Hours (3) → 1 Hour (2) → 10 Minutes (1) → 1 Action (0)
+        const checkOrder = [
+          { idx: 3, name: "10 Hours" },
+          { idx: 2, name: "1 Hour" },
+          { idx: 1, name: "10 Minutes" },
+          { idx: 0, name: "1 Action" },
+        ];
+        for (const check of checkOrder) {
+          if (!rolls[check.idx]) {
+            rolls[check.idx] = true;
+            recovered = true;
+            recoveredName = check.name;
+            break;
+          }
+        }
+        if (recovered) {
+          await actor.update({ [rollsPath]: rolls });
+        }
+      } else {
+        // Legacy individual flags
+        const rec = sys.combat?.recoveries || {};
+        const checkList = [
+          { key: "tenHours", name: "10 Hours" },
+          { key: "oneHour", name: "1 Hour" },
+          { key: "tenMinutes", name: "10 Minutes" },
+          { key: "tenMinutes2", name: "10 Minutes" },
+          { key: "oneAction", name: "1 Action" },
+          { key: "oneAction2", name: "1 Action" },
+          { key: "oneAction3", name: "1 Action" },
+          { key: "oneAction4", name: "1 Action" },
+          { key: "oneAction5", name: "1 Action" },
+          { key: "oneAction6", name: "1 Action" },
+          { key: "oneAction7", name: "1 Action" },
+        ];
+        for (const item of checkList) {
+          if (rec[item.key]) {
+            await actor.update({ [`system.combat.recoveries.${item.key}`]: false });
+            recovered = true;
+            recoveredName = item.name;
+            break;
+          }
+        }
+      }
+
+      if (recovered) {
+        recoveredCount++;
+        recoveredActors.push(`${actor.name} — ${recoveredName}`);
+      }
+    }
+
+    if (recoveredCount > 0) {
+      ChatMessage.create({
+        speaker: { alias: "GM Recovery" },
+        content: `<div style="padding:8px 12px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:6px;">
+          <strong style="color:#3b82f6;">💧 ONE Recovery Applied</strong><br>
+          <span style="color:#ccc;">${recoveredActors.join("<br>")}</span>
+        </div>`
+      });
+      ui.notifications.info(`ONE recovery applied to ${recoveredCount} actor(s).`);
+    } else {
+      ui.notifications.info("All actors already have full recovery rolls.");
+    }
+  }
+
+  async _doFullRecoveryAll() {
+    const pcs = this._getPartyData().map(pc => game.actors.get(pc.id)).filter(a => a);
+    if (!pcs.length) {
+      ui.notifications.warn("No active actors found for recovery.");
+      return;
+    }
+
+    let recoveredCount = 0;
+
+    for (const actor of pcs) {
+      const updateData = {
+        "system.combat.recoveries.oneAction": false,
+        "system.combat.recoveries.oneAction2": false,
+        "system.combat.recoveries.oneAction3": false,
+        "system.combat.recoveries.oneAction4": false,
+        "system.combat.recoveries.oneAction5": false,
+        "system.combat.recoveries.oneAction6": false,
+        "system.combat.recoveries.oneAction7": false,
+        "system.combat.recoveries.tenMinutes": false,
+        "system.combat.recoveries.tenMinutes2": false,
+        "system.combat.recoveries.oneHour": false,
+        "system.combat.recoveries.tenHours": false,
+      };
+
+      if (Array.isArray(actor.system?.combat?.recoveries?.recoveryRolls)) {
+        updateData["system.combat.recoveries.recoveryRolls"] = [true, true, true, true];
+      } else if (Array.isArray(actor.system?.recoveries?.recoveryRolls)) {
+        updateData["system.recoveries.recoveryRolls"] = [true, true, true, true];
+      } else if (Array.isArray(actor.system?.combat?.recoveryRolls)) {
+        updateData["system.combat.recoveryRolls"] = [true, true, true, true];
+      }
+
+      await actor.update(updateData);
+      recoveredCount++;
+    }
+
+    ChatMessage.create({
+      speaker: { alias: "GM Recovery" },
+      content: `<div style="padding:8px 12px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:6px;">
+        <strong style="color:#3b82f6;">💧 FULL Rest Applied</strong><br>
+        <span style="color:#ccc;">All recovery rolls restored for ${recoveredCount} actor(s).</span>
+      </div>`
+    });
+    ui.notifications.info(`FULL rest applied to ${recoveredCount} actor(s).`);
   }
 
   _showGMGroupRollAttributes(btnEl) {
@@ -2036,10 +3172,11 @@ ${paths}  </svg>
     subMenu.className = "cgm-status-submenu";
     subMenu.style.cssText = `position:fixed;left:${endX - subHalf}px;top:${endY - subHalf}px;width:${subSize}px;height:${subSize}px;z-index:202;`;
 
-    // 2 slices: HEALTH and EFFECTS
+    // 3 slices: EFFECTS, REMOVE ALL, HEALTH
     const slices = [
-      { key: "health", label: "Health", icon: "fa-heart-pulse", color: "#40b060", startAngle: 225, endAngle: 315 },
-      { key: "effects", label: "Effects", icon: "fa-sparkles", color: "#8a74cc", startAngle: 45, endAngle: 135 },
+      { key: "effects", label: "Effects", icon: "fa-sparkles", color: "#8a74cc", startAngle: 0, endAngle: 120 },
+      { key: "removeEffects", label: "Clear FX", icon: "fa-ban", color: "#d94040", startAngle: 120, endAngle: 240 },
+      { key: "health", label: "Health", icon: "fa-heart-pulse", color: "#40b060", startAngle: 240, endAngle: 360 },
     ];
 
     let svgPaths = "";
@@ -2102,13 +3239,27 @@ ${paths}  </svg>
 
     // ── Click handlers ──
     subMenu.querySelectorAll(".cgm-sub-seg, .cgm-sub-label").forEach(el => {
-      el.addEventListener("click", (e) => {
+      el.addEventListener("click", async (e) => {
         e.stopPropagation();
         const key = el.dataset.key;
         if (key === "health") {
           this._showHealthSubmenu(actorId, wrapEl, endX, endY);
         } else if (key === "effects") {
           this._showDfredsEffectsPicker(actorId, wrapEl);
+        } else if (key === "removeEffects") {
+          const actor = game.actors.get(actorId);
+          if (!actor) return;
+          const effects = actor.effects.filter(e => !e.disabled);
+          if (effects.length === 0) {
+            ui.notifications.warn(`${actor.name} has no active effects.`);
+          } else {
+            for (const effect of effects) {
+              await effect.delete();
+            }
+            ui.notifications.info(`All effects removed from ${actor.name}.`);
+          }
+          this._hideStatusMenu();
+          this._hideRadialMenu();
         }
       });
     });
@@ -2652,36 +3803,41 @@ ${paths}  </svg>
     }
   }
 
-  /* ─── DAMAGE Submenu ─── */
-  _showDamageSubMenu(actorId, wrapEl) {
-    const result = this._buildSubMenuBase(actorId, wrapEl, 3, 9, 110, [
-      { key: "input", label: "Input", icon: "fa-skull", color: "#d94040" },
-      { key: "track", label: "Track", icon: "fa-heart-pulse", color: "#d94040" },
-    ], "rgba(217,64,64,0.4)", "damage");
+  /* ─── VALUES Submenu — 4 segments: Cash, Assets, Items, Drop ─── */
+  _showValuesSubMenu(actorId, wrapEl) {
+    const result = this._buildSubMenuBase(actorId, wrapEl, 3, 9, 140, [
+      { key: "cash",   label: "Cash & Values", icon: "fa-coins",     color: "#d4a94d" },
+      { key: "assets", label: "Assets",        icon: "fa-landmark",  color: "#c8a96e" },
+      { key: "items",  label: "Items",         icon: "fa-box-open",  color: "#64b4dc" },
+      { key: "drop",   label: "Drop Item",     icon: "fa-hand-holding-medical", color: "#6ecf7a" },
+    ], "rgba(212,169,77,0.4)", "values");
     if (!result) return;
     const { subMenu } = result;
-    this._damageSubMenuEl = subMenu;
+    this._valuesSubMenuEl = subMenu;
 
     subMenu.querySelectorAll(".cgm-sub-seg, .cgm-sub-label").forEach(el => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
         const key = el.dataset.key;
-        if (key === "input") {
-          this._hideDamageSubMenu();
-          this._showDamagePanel(actorId, wrapEl);
-        } else if (key === "track") {
-          this._hideDamageSubMenu();
-          this._hideRadialMenu();
-          this._showDamageTrackPanel(actorId, wrapEl);
+        this._hideValuesSubMenu();
+        this._hideRadialMenu();
+        if (key === "cash") {
+          this._showCashValuesPanel(actorId, wrapEl);
+        } else if (key === "assets") {
+          this._showAssetsPanel(actorId, wrapEl);
+        } else if (key === "items") {
+          this._showItemsPanel(actorId, wrapEl);
+        } else if (key === "drop") {
+          this._showDropItemPanel(actorId, wrapEl);
         }
       });
     });
   }
 
-  _hideDamageSubMenu() {
-    if (this._damageSubMenuEl) {
-      this._damageSubMenuEl.classList.remove("cgm-status-submenu-visible");
-      setTimeout(() => { this._damageSubMenuEl?.remove(); this._damageSubMenuEl = null; }, 200);
+  _hideValuesSubMenu() {
+    if (this._valuesSubMenuEl) {
+      this._valuesSubMenuEl.classList.remove("cgm-status-submenu-visible");
+      setTimeout(() => { this._valuesSubMenuEl?.remove(); this._valuesSubMenuEl = null; }, 200);
     }
     if (this._connectingLineEl) {
       this._connectingLineEl.remove();
@@ -2859,13 +4015,16 @@ ${paths}  </svg>
     panel.id = "cgm-skill-list-panel";
     panel.style.cssText = `position:fixed;left:${left}px;top:${top}px;width:${panelW}px;z-index:var(--cgm-z-dialog,10000);`;
 
-    const skillRows = skills.map((s, idx) => `
+    const skillRows = skills.map((s, idx) => {
+      const trainingClass = this._getSkillTrainingClass(s);
+      return `
       <div class="cgm-skill-row" data-skill-idx="${idx}" style="animation-delay:${idx * 0.02}s">
         <i class="fas fa-dice-d20"></i>
-        <span class="cgm-skill-name">${foundry.utils.escapeHTML(s.name)}</span>
+        <span class="cgm-skill-name ${trainingClass}">${foundry.utils.escapeHTML(s.name)}</span>
         <span class="cgm-skill-pool">${this._detectSkillPoolMeta(s).pool}</span>
       </div>
-    `).join("");
+    `;
+    }).join("");
 
     panel.innerHTML = `
       <div class="cgm-skill-list-header">
@@ -2958,13 +4117,16 @@ ${paths}  </svg>
     panel.id = "cgm-skill-freq-panel";
     panel.style.cssText = `position:fixed;left:${left}px;top:${top}px;width:${panelW}px;z-index:var(--cgm-z-dialog,10000);`;
 
-    const skillRows = frequentSkills.map((s, idx) => `
+    const skillRows = frequentSkills.map((s, idx) => {
+      const trainingClass = this._getSkillTrainingClass(s);
+      return `
       <div class="cgm-skill-row" data-freq-idx="${idx}" style="animation-delay:${idx * 0.04}s">
         <i class="fas fa-star"></i>
-        <span class="cgm-skill-name">${foundry.utils.escapeHTML(s.name)}</span>
+        <span class="cgm-skill-name ${trainingClass}">${foundry.utils.escapeHTML(s.name)}</span>
         <span class="cgm-skill-pool">${this._detectSkillPoolMeta(s).pool}</span>
       </div>
-    `).join("");
+    `;
+    }).join("");
 
     panel.innerHTML = `
       <div class="cgm-skill-list-header">
@@ -3086,6 +4248,23 @@ ${paths}  </svg>
 
   /* ─── Helpers ─── */
   _detectSkillPoolMeta(skillItem) {
+    // First check the skill's native stat property (Cypher System stores pool in system.stat)
+    const stat = skillItem.system?.stat;
+    if (stat) {
+      const pool = stat.toString().toLowerCase();
+      if (pool === "might") return { pool: "Might" };
+      if (pool === "speed") return { pool: "Speed" };
+      if (pool === "intellect") return { pool: "Intellect" };
+    }
+    // Fallback: check Cypher Cool Items flag
+    const cciData = skillItem.getFlag?.("cypher-cool-items", "data");
+    if (cciData?.skillStat) {
+      const pool = cciData.skillStat.toString().toLowerCase();
+      if (pool === "might") return { pool: "Might" };
+      if (pool === "speed") return { pool: "Speed" };
+      if (pool === "intellect") return { pool: "Intellect" };
+    }
+    // Last resort: detect from name/description
     const name = (skillItem.name || "").toLowerCase();
     const desc = (skillItem.system?.description || skillItem.system?.basic?.description || "").toLowerCase();
     const combined = name + " " + desc;
@@ -3093,6 +4272,43 @@ ${paths}  </svg>
     if (/\bspeed\b/.test(combined)) return { pool: "Speed" };
     if (/\bintellect\b/.test(combined)) return { pool: "Intellect" };
     return { pool: "Might" };
+  }
+
+  /* ─── Skill training level color class ─── */
+  _getSkillTrainingClass(skillItem) {
+    const sys = skillItem.system || {};
+    
+    // Cypher System v2+ stores skill rating as string in system.basic.rating
+    // Values: "Inability", "Practiced", "Trained", "Specialized"
+    const rating = sys.basic?.rating || sys.rating;
+    
+    if (typeof rating === 'string') {
+      const r = rating.toLowerCase();
+      if (r === 'inability') return "cgm-skill-inability";
+      if (r === 'practiced' || r === 'untrained') return "";
+      if (r === 'trained') return "cgm-skill-trained";
+      if (r === 'specialized') return "cgm-skill-specialized";
+    }
+    
+    // Numeric fallback (older versions or other systems)
+    if (typeof rating === 'number') {
+      if (rating <= -1) return "cgm-skill-inability";
+      if (rating === 0) return "";
+      if (rating === 1) return "cgm-skill-trained";
+      if (rating >= 2) return "cgm-skill-specialized";
+    }
+    
+    // Check Cypher Cool Items flag
+    const cciData = skillItem.getFlag?.("cypher-cool-items", "data");
+    if (cciData?.skillTraining) {
+      const t = cciData.skillTraining.toLowerCase();
+      if (t === "inability") return "cgm-skill-inability";
+      if (t === "practiced" || t === "untrained") return "";
+      if (t === "trained") return "cgm-skill-trained";
+      if (t === "specialized") return "cgm-skill-specialized";
+    }
+    
+    return "";
   }
 
   async _doFullRest(actor) {
@@ -3248,13 +4464,24 @@ ${paths}  </svg>
 
   /* ─── CYPHERS Submenu ─── */
   _showCyphersSubMenu(actorId, wrapEl) {
+    const actor = game.actors.get(actorId);
+    const artifacts = actor?.items?.filter(i => i.type === "artifact") ?? [];
+    const sys = actor?.system ?? {};
+    const cypherLimit = sys.basic?.cypherLimit ?? sys.settings?.cypherLimit ?? 2;
+    const limitReached = cypherLimit > 0 && artifacts.length >= cypherLimit;
+
     const result = this._buildSubMenuBase(actorId, wrapEl, 5, 9, 110, [
-      { key: "view", label: "View", icon: "fa-flask", color: "#8a74cc" },
-      { key: "create", label: "New", icon: "fa-plus", color: "#8a74cc" },
-    ], "rgba(138,116,204,0.4)");
+      { key: "view", label: "View", icon: "fa-flask", color: limitReached ? "#ff4444" : "#8a74cc" },
+      { key: "create", label: "New", icon: "fa-plus", color: limitReached ? "#ff4444" : "#8a74cc" },
+    ], limitReached ? "rgba(255,68,68,0.5)" : "rgba(138,116,204,0.4)", "cyphers");
     if (!result) return;
     const { subMenu } = result;
     this._cyphersSubMenuEl = subMenu;
+
+    // Add flashing red class if limit reached
+    if (limitReached) {
+      subMenu.classList.add("cgm-cyphers-limit-reached");
+    }
 
     subMenu.querySelectorAll(".cgm-sub-seg, .cgm-sub-label").forEach(el => {
       el.addEventListener("click", (e) => {
@@ -3283,27 +4510,87 @@ ${paths}  </svg>
     }
   }
 
-  /* ─── Add Note Dialog ─── */
+  /* ─── Add Note Dialog (Fancy Custom Window) ─── */
   async _showAddNoteDialog(actorId) {
     const actor = game.actors.get(actorId);
     if (!actor) return;
-    const note = await new Promise((resolve) => {
-      new Dialog({
-        title: `Add Note — ${actor.name}`,
-        content: `<div style="padding:12px;"><textarea id="cgm-new-note" rows="4" style="width:100%;background:rgba(0,0,0,0.5);border:1px solid rgba(200,169,110,0.3);border-radius:4px;color:#e8e0d4;padding:8px;font-family:inherit;resize:vertical;" placeholder="Enter note..."></textarea></div>`,
-        buttons: {
-          add: { icon: '<i class="fas fa-plus"></i>', label: "Add", callback: (html) => resolve(html.find("#cgm-new-note").val()) },
-          cancel: { icon: '<i class="fas fa-times"></i>', label: "Cancel", callback: () => resolve(null) }
-        },
-        default: "add"
-      }).render(true);
+
+    // Remove existing dialog
+    document.querySelector('.cgm-note-add-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cgm-note-add-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);opacity:0;transition:opacity 0.2s ease;';
+
+    const panel = document.createElement('div');
+    panel.className = 'cgm-note-add-panel';
+    panel.style.cssText = 'background:linear-gradient(145deg,#1a1525 0%,#0f0b18 100%);border:1px solid rgba(200,169,110,0.4);border-radius:12px;width:420px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,0.6),0 0 0 1px rgba(200,169,110,0.1);overflow:hidden;transform:scale(0.95);transition:transform 0.25s cubic-bezier(0.34,1.56,0.64,1);';
+
+    panel.innerHTML = `
+      <div class="cgm-note-add-header" style="background:linear-gradient(90deg,rgba(200,169,110,0.15),transparent);padding:16px 20px;border-bottom:1px solid rgba(200,169,110,0.15);display:flex;align-items:center;gap:12px;">
+        <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,rgba(200,169,110,0.3),rgba(200,169,110,0.1));display:flex;align-items:center;justify-content:center;border:1px solid rgba(200,169,110,0.3);">
+          <i class="fas fa-sticky-note" style="color:#c8a96e;font-size:14px;"></i>
+        </div>
+        <div style="flex:1;">
+          <div style="color:#e8e0d4;font-size:15px;font-weight:600;letter-spacing:0.3px;">Add Note</div>
+          <div style="color:#8a7a6a;font-size:11px;margin-top:2px;">${actor.name}</div>
+        </div>
+        <button class="cgm-note-add-close" style="width:28px;height:28px;border-radius:50%;border:none;background:rgba(255,255,255,0.05);color:#a09080;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" onmouseover="this.style.background='rgba(255,100,100,0.2)';this.style.color='#ff7070';" onmouseout="this.style.background='rgba(255,255,255,0.05)';this.style.color='#a09080';">
+          <i class="fas fa-xmark" style="font-size:12px;"></i>
+        </button>
+      </div>
+      <div style="padding:20px;">
+        <textarea id="cgm-note-add-text" placeholder="Write your note here..." style="width:100%;min-height:120px;background:rgba(0,0,0,0.3);border:1px solid rgba(200,169,110,0.2);border-radius:8px;color:#e8e0d4;padding:12px;font-family:inherit;font-size:13px;line-height:1.6;resize:vertical;outline:none;transition:border-color 0.2s;" onfocus="this.style.borderColor='rgba(200,169,110,0.5)';this.style.boxShadow='0 0 0 3px rgba(200,169,110,0.1)';" onblur="this.style.borderColor='rgba(200,169,110,0.2)';this.style.boxShadow='none';"></textarea>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+          <button class="cgm-note-add-cancel" style="padding:8px 18px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#a09080;font-size:12px;cursor:pointer;transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)';this.style.color='#e8e0d4';" onmouseout="this.style.background='rgba(255,255,255,0.05)';this.style.color='#a09080';">Cancel</button>
+          <button class="cgm-note-add-save" style="padding:8px 20px;border-radius:6px;border:none;background:linear-gradient(135deg,rgba(200,169,110,0.8),rgba(180,150,90,0.7));color:#1a1525;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s;box-shadow:0 2px 8px rgba(200,169,110,0.2);" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 12px rgba(200,169,110,0.3)';" onmouseout="this.style.transform='';this.style.boxShadow='0 2px 8px rgba(200,169,110,0.2)';">
+            <i class="fas fa-plus" style="margin-right:6px;font-size:10px;"></i>Add Note
+          </button>
+        </div>
+      </div>
+    `;
+
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    // Animate in
+    requestAnimationFrame(() => {
+      overlay.style.opacity = '1';
+      panel.style.transform = 'scale(1)';
     });
-    if (note?.trim()) {
-      const notes = this._getActorNotes(actor);
-      notes.push(note.trim());
-      await actor.setFlag("cypher-gm-taskbar", "notes", notes);
-      ui.notifications.info(`Note added for ${actor.name}`);
-    }
+
+    // Auto-focus textarea
+    setTimeout(() => panel.querySelector('#cgm-note-add-text')?.focus(), 100);
+
+    // Close handlers
+    const closeDialog = () => {
+      overlay.style.opacity = '0';
+      panel.style.transform = 'scale(0.95)';
+      setTimeout(() => overlay.remove(), 200);
+    };
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeDialog(); });
+    panel.querySelector('.cgm-note-add-close')?.addEventListener('click', closeDialog);
+    panel.querySelector('.cgm-note-add-cancel')?.addEventListener('click', closeDialog);
+
+    // Save handler
+    panel.querySelector('.cgm-note-add-save')?.addEventListener('click', async () => {
+      const text = panel.querySelector('#cgm-note-add-text')?.value?.trim();
+      if (!text) {
+        ui.notifications.warn('Please enter a note.');
+        return;
+      }
+      await this._addActorNote(actorId, text);
+      ui.notifications.info(`Note added for ${actor.name}.`);
+      closeDialog();
+    });
+
+    // Enter to save (Ctrl+Enter)
+    panel.querySelector('#cgm-note-add-text')?.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'Enter') {
+        panel.querySelector('.cgm-note-add-save')?.click();
+      }
+    });
   }
 
   /* ─── Create Cypher Dialog ─── */
@@ -3520,11 +4807,11 @@ ${paths}  </svg>
 
     // ── Build notes content ──
     const notesList = notes.length
-      ? notes.map((n, i) => `
+      ? notes.map((n) => `
         <div class="cgm-note-item ${n.archived ? 'cgm-note-archived' : ''}">
           <div class="cgm-note-meta">
             <span>${n.date} ${n.time} ${n.archived ? '<span class="cgm-note-archive-badge">Archived</span>' : ''}</span>
-            <button class="cgm-note-delete" data-index="${i}" title="Delete"><i class="fas fa-times"></i></button>
+            <button class="cgm-note-delete" data-note-id="${n.id}" title="Delete"><i class="fas fa-times"></i></button>
           </div>
           <div class="cgm-note-text">${this._escapeHTML(n.text)}</div>
         </div>
@@ -3628,8 +4915,8 @@ ${paths}  </svg>
 
     panel.querySelectorAll(".cgm-note-delete").forEach(btn => {
       btn.addEventListener("click", async () => {
-        const idx = parseInt(btn.dataset.index);
-        await this._deleteActorNote(actorId, idx);
+        const noteId = btn.dataset.noteId;
+        await this._deleteActorNote(actorId, noteId);
         await refreshPanel();
       });
     });
@@ -3781,6 +5068,59 @@ ${paths}  </svg>
 
     // Store cleanup on panel element
     panel._cgmDragCleanup = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+  }
+
+  /* Helper: make a connected panel resizable */
+  _makePanelResizable(panel, sizeProp, minW = 260, minH = 180, maxW = null, maxH = null) {
+    const handle = panel.querySelector(".cgm-items-resize-handle");
+    if (!handle) return;
+    let isResizing = false;
+
+    handle.addEventListener("mousedown", (e) => {
+      isResizing = true;
+      panel.style.transition = "none";
+      e.preventDefault();
+    });
+
+    const onMouseMove = (e) => {
+      if (!isResizing) return;
+      e.preventDefault();
+      let nw = Math.max(minW, e.clientX - panel.offsetLeft);
+      let nh = Math.max(minH, e.clientY - panel.offsetTop);
+      if (maxW && nw > maxW) nw = maxW;
+      if (maxH && nh > maxH) nh = maxH;
+      panel.style.width = nw + "px";
+      panel.style.minHeight = nh + "px";
+      panel.style.height = nh + "px";
+      const ls = this._itemsLineStart;
+      if (ls) {
+        this._updateNotesLine(ls.x, ls.y, panel.offsetLeft + nw / 2, panel.offsetTop + nh / 2);
+      }
+    };
+
+    const onMouseUp = () => {
+      if (!isResizing) return;
+      isResizing = false;
+      panel.style.transition = "";
+      this[sizeProp] = {
+        width: panel.offsetWidth,
+        height: panel.offsetHeight,
+      };
+      this._savePanelPositions();
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+
+    if (!panel._cgmDragCleanup) {
+      panel._cgmDragCleanup = () => {};
+    }
+    const oldCleanup = panel._cgmDragCleanup;
+    panel._cgmDragCleanup = () => {
+      oldCleanup();
       document.removeEventListener("mousemove", onMouseMove);
       document.removeEventListener("mouseup", onMouseUp);
     };
@@ -4572,8 +5912,10 @@ ${paths}  </svg>
     if (!actor) return;
     const name = actor?.name || "Character";
 
-    // Get cyphers
+    // Get cyphers and artifacts
     const cyphers = actor.items?.filter(i => i.type === "cypher") || [];
+    const artifacts = actor.items?.filter(i => i.type === "artifact") || [];
+    const allItems = [...cyphers, ...artifacts];
     // Get cypher limit
     let cypherLimit = 2;
     try {
@@ -4619,7 +5961,7 @@ ${paths}  </svg>
     let defY = clampedCy + Math.sin(cypherRad) * lineEndR;
 
     const panelW = 260;
-    const panelH = Math.min(400, 180 + cyphers.length * 50);
+    const panelH = Math.min(400, 180 + allItems.length * 50);
 
     defX = Math.max(panelW / 2 + 8, Math.min(defX, window.innerWidth - panelW / 2 - 8));
     defY = Math.max(panelH / 2 + 8, Math.min(defY, window.innerHeight - panelH / 2 - 8));
@@ -4669,17 +6011,20 @@ ${paths}  </svg>
     panel.className = "cgm-connected-panel cgm-cyphers-panel";
     panel.style.cssText = `position:fixed;left:${panelLeft}px;top:${panelTop}px;width:${panelW}px;min-height:${panelH}px;z-index:202;`;
 
-    const cypherList = cyphers.length
-      ? cyphers.map((c, i) => `
-        <div class="cgm-cypher-item">
-          <div class="cgm-cypher-info">
-            <span class="cgm-cypher-name">${this._escapeHTML(c.name)}</span>
-            <span class="cgm-cypher-level">Lvl ${c.system?.level ?? "?"}</span>
-          </div>
-          <button class="cgm-cypher-use-btn" data-index="${i}"><i class="fas fa-flask"></i> Use</button>
-        </div>
-      `).join("")
-      : `<div class="cgm-cypher-empty">No cyphers carried</div>`;
+    const itemList = allItems.length
+      ? allItems.map((item, i) => {
+          const isCypher = item.type === "cypher";
+          return `
+            <div class="cgm-cypher-item">
+              <div class="cgm-cypher-info">
+                <span class="cgm-cypher-name">${this._escapeHTML(item.name)}</span>
+                <span class="cgm-cypher-level">Lvl ${item.system?.level ?? "?"}</span>
+              </div>
+              ${isCypher ? `<button class="cgm-cypher-use-btn" data-index="${i}"><i class="fas fa-flask"></i> Use</button>` : `<span class="cgm-cypher-artifact-tag"><i class="fas fa-gem"></i></span>`}
+            </div>
+          `;
+        }).join("")
+      : `<div class="cgm-cypher-empty">No cyphers or artifacts carried</div>`;
 
     panel.innerHTML = `
       <div class="cgm-connected-panel-header">
@@ -4689,9 +6034,9 @@ ${paths}  </svg>
       </div>
       <div class="cgm-cyphers-body">
         <div class="cgm-cyphers-count">
-          <span class="cgm-cyphers-carried">${cyphers.length}</span> / <span class="cgm-cyphers-max">${cypherLimit}</span>
+          <span class="cgm-cyphers-carried">${artifacts.length}</span> / <input type="number" class="cgm-cyphers-limit-input" value="${cypherLimit}" min="1" max="99" title="Artifact limit">
         </div>
-        <div class="cgm-cyphers-list">${cypherList}</div>
+        <div class="cgm-cyphers-list">${itemList}</div>
       </div>
     `;
 
@@ -4701,23 +6046,34 @@ ${paths}  </svg>
     requestAnimationFrame(() => requestAnimationFrame(() => panel.classList.add("cgm-connected-panel-visible")));
     this._makePanelDraggable(panel, "_cyphersLineStart", "_cyphersPanelPos");
 
+    // ── Limit input handler ──
+    const limitInput = panel.querySelector(".cgm-cyphers-limit-input");
+    if (limitInput) {
+      limitInput.addEventListener("change", async () => {
+        const newLimit = Math.max(1, Math.min(99, parseInt(limitInput.value) || 2));
+        limitInput.value = newLimit;
+        await actor.update({ "system.basic.cypherLimit": newLimit });
+        ui.notifications.info(`${actor.name}'s artifact limit set to ${newLimit}.`);
+      });
+    }
+
     // ── Handlers ──
     panel.querySelectorAll(".cgm-cypher-use-btn").forEach(btn => {
       btn.addEventListener("click", async () => {
         const idx = parseInt(btn.dataset.index);
-        const cypher = cyphers[idx];
-        if (!cypher) return;
+        const item = allItems[idx];
+        if (!item || item.type !== "cypher") return;
         // Send to chat that cypher was used
         ChatMessage.create({
           speaker: { actor: actorId, alias: actor.name },
           content: `<div style="padding:6px 10px;background:rgba(136,85,204,0.1);border:1px solid rgba(136,85,204,0.3);border-radius:6px;">
-            <strong style="color:#aa77dd;">🧪 ${actor.name} uses ${cypher.name}</strong><br>
-            <span style="color:#aaa;font-size:12px;">Level ${cypher.system?.level ?? "?"} Cypher — single use consumed</span>
+            <strong style="color:#aa77dd;">🧪 ${actor.name} uses ${item.name}</strong><br>
+            <span style="color:#aaa;font-size:12px;">Level ${item.system?.level ?? "?"} Cypher — single use consumed</span>
           </div>`
         });
         // Delete the cypher item (single use)
-        await cypher.delete();
-        ui.notifications.info(`${cypher.name} used and consumed.`);
+        await item.delete();
+        ui.notifications.info(`${item.name} used and consumed.`);
         this._hideCyphersPanel();
       });
     });
@@ -5044,8 +6400,111 @@ ${paths}  </svg>
     }
   }
 
+  /* ─── Effect Tooltip ─── */
+
+  _showEffectTooltip(effect, targetEl) {
+    this._hideEffectTooltip();
+
+    const tooltip = document.createElement("div");
+    tooltip.className = "cgm-effect-tooltip";
+
+    const plainDesc = effect.description ? effect.description.replace(/<[^>]*>/g, '') : '';
+    const descHtml = plainDesc
+      ? this._escapeHTML(plainDesc).replace(/\n/g, "<br>")
+      : '<em style="opacity:0.6">No description.</em>';
+
+    const tempBadge = effect.isTemporary
+      ? '<span class="cgm-effect-tooltip-temp"><i class="fas fa-hourglass-half"></i> Temporary</span>'
+      : '';
+
+    tooltip.innerHTML = `
+      <div class="cgm-effect-tooltip-header">
+        <img src="${effect.icon}" alt="" class="cgm-effect-tooltip-icon">
+        <div class="cgm-effect-tooltip-title">
+          ${effect.name}
+          ${tempBadge}
+        </div>
+      </div>
+      <div class="cgm-effect-tooltip-body">
+        ${descHtml}
+      </div>
+    `;
+
+    document.body.appendChild(tooltip);
+    this._effectTooltipEl = tooltip;
+
+    // Position ABOVE the icon
+    const rect = targetEl.getBoundingClientRect();
+    const tRect = tooltip.getBoundingClientRect();
+    let left = rect.left + rect.width / 2 - tRect.width / 2;
+    let top = rect.top - tRect.height - 8;
+
+    if (left < 8) left = 8;
+    if (left + tRect.width > window.innerWidth - 8) left = window.innerWidth - tRect.width - 8;
+    if (top < 8) top = rect.bottom + 8;
+    if (top + tRect.height > window.innerHeight - 8) top = window.innerHeight - tRect.height - 8;
+
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    tooltip.classList.add("cgm-effect-tooltip-visible");
+
+    // Keep alive on hover
+    tooltip.addEventListener("mouseenter", () => {
+      clearTimeout(this._effectTooltipTimer);
+    });
+    tooltip.addEventListener("mouseleave", () => {
+      this._hideEffectTooltip();
+    });
+  }
+
+  _hideEffectTooltip() {
+    if (this._effectTooltipEl) {
+      this._effectTooltipEl.remove();
+      this._effectTooltipEl = null;
+    }
+    if (this._effectTooltipTimer) {
+      clearTimeout(this._effectTooltipTimer);
+      this._effectTooltipTimer = null;
+    }
+  }
+
   _bindPortraitEvents() {
     if (!this.element) return;
+
+    // Event delegation for effect icon hover tooltips (works even after DOM updates)
+    const float = this.element.querySelector('.cgm-portraits-float');
+    if (float) {
+      float.addEventListener('mouseenter', (e) => {
+        const icon = e.target.closest('.cgm-effect-icon');
+        if (!icon) return;
+        const wrap = icon.closest('.cgm-portrait-wrap');
+        if (!wrap) return;
+        const actorId = wrap.dataset.actorId;
+        const effectId = icon.dataset.effectId;
+        const actor = game.actors.get(actorId);
+        const effect = actor?.effects.get(effectId);
+        if (!effect) return;
+        e.stopPropagation(); // don't trigger portrait hover
+        this._effectTooltipTimer = setTimeout(() => {
+          this._showEffectTooltip({
+            id: effect.id,
+            name: effect.name || effect.label || "Unknown Effect",
+            icon: effect.img || effect.icon || "icons/svg/aura.svg",
+            description: effect.description || "",
+            isTemporary: effect.isTemporary || false
+          }, icon);
+        }, 300);
+      }, true);
+      float.addEventListener('mouseleave', (e) => {
+        const icon = e.target.closest('.cgm-effect-icon');
+        if (!icon) return;
+        clearTimeout(this._effectTooltipTimer);
+        this._effectTooltipTimer = setTimeout(() => {
+          this._hideEffectTooltip();
+        }, 100);
+      }, true);
+    }
+
     this.element.querySelectorAll(".cgm-portrait-wrap").forEach(wrap => {
       const actorId = wrap.dataset.actorId;
 
@@ -5127,6 +6586,12 @@ ${paths}  </svg>
         xpWrap.innerHTML = this._buildXPCircle(pc.xp, xpSize);
       }
 
+      // Update recovery drops (display only)
+      const recoveryWrap = wrap.querySelector('.cgm-recovery-wrap');
+      if (recoveryWrap) {
+        recoveryWrap.innerHTML = this._buildRecoveryDrops(pc.recoveryRolls);
+      }
+
       // Update damage track overlay
       const dmgOverlay = wrap.querySelector('.cgm-portrait-damage');
       if (dmgOverlay) {
@@ -5139,6 +6604,22 @@ ${paths}  </svg>
         const dmgColor = this._getDamageTrackColor(pc.damageTrack);
         const borderColor = this._portraitBorderColor || dmgColor;
         img.style.borderColor = borderColor;
+      }
+
+      // Update active effect icons (refresh HTML without full re-render)
+      const visualWrap = wrap.querySelector('.cgm-portrait-visual');
+      if (visualWrap) {
+        const effectsContainer = visualWrap.querySelector('.cgm-portrait-effects');
+        const newEffectsHTML = this._buildEffectIconsHTML(pc, this._portraitSize);
+        if (effectsContainer) {
+          effectsContainer.outerHTML = newEffectsHTML;
+        } else if (newEffectsHTML) {
+          // No existing container but we have effects — insert before img-wrap
+          const imgWrap = visualWrap.querySelector('.cgm-portrait-img-wrap');
+          if (imgWrap) {
+            imgWrap.insertAdjacentHTML('beforebegin', newEffectsHTML);
+          }
+        }
       }
     });
 
@@ -5208,6 +6689,7 @@ ${paths}  </svg>
       case "cyphers":    html = this._buildCyphersPanel();    break;
       case "recovery":   html = this._buildRecoveryPanel();   break;
       case "npcs":       html = this._buildNPCsPanel();       break;
+      case "items":      html = this._buildItemsPanel();      break;
       case "notes":      html = this._buildNotesPanel();      break;
       case "settings":   html = this._buildSettingsPanel();   break;
     }
@@ -5243,24 +6725,44 @@ ${paths}  </svg>
       const effort = sys.basic?.effort ?? sys.advancement?.effort ?? 1;
       const xp = Number(sys.basic?.xp ?? sys.advancement?.xp ?? 0);
       const damageTrack = sys.combat?.damageTrack?.value ?? sys.damageTrack ?? "Hale";
-      const cypherCount = actor.items.filter(i => i.type === "cypher" || i.type === "artifact").length;
+      const cypherCount = actor.items.filter(i => i.type === "artifact").length;
       const cypherLimit = sys.basic?.cypherLimit ?? sys.settings?.cypherLimit ?? 0;
 
       // Recovery state
       let recoveryAvailable = 4;
       let recoveryTotal = 4;
+      let recoveryRolls = [true, true, true, true];
       let rolls = null;
+
+      // Active effects (temporary and non-temporary, but not disabled)
+      const activeEffects = actor.effects
+        ?.filter(e => !e.disabled)
+        .map(e => ({
+          id: e.id,
+          name: e.name || e.label || "Unknown Effect",
+          icon: e.img || e.icon || "icons/svg/aura.svg",
+          description: e.description || "",
+          isTemporary: e.isTemporary || false
+        })) || [];
       if (Array.isArray(sys.combat?.recoveries?.recoveryRolls)) rolls = sys.combat.recoveries.recoveryRolls;
       else if (Array.isArray(sys.recoveries?.recoveryRolls)) rolls = sys.recoveries.recoveryRolls;
       else if (Array.isArray(sys.combat?.recoveryRolls)) rolls = sys.combat.recoveryRolls;
 
       if (rolls) {
-        recoveryAvailable = rolls.filter(r => !!r).length;
-        recoveryTotal = rolls.length;
+        recoveryRolls = rolls.slice(0, 4);
+        recoveryAvailable = recoveryRolls.filter(r => !!r).length;
+        recoveryTotal = recoveryRolls.length;
       } else {
         const rec = sys.combat?.recoveries || {};
         const used = [rec.oneAction, rec.tenMinutes, rec.oneHour, rec.tenHours].filter(Boolean).length;
         recoveryAvailable = 4 - used;
+        // Build rolls array from boolean flags
+        recoveryRolls = [
+          !rec.oneAction,
+          !rec.tenMinutes,
+          !rec.oneHour,
+          !rec.tenHours
+        ];
       }
 
       return {
@@ -5278,7 +6780,9 @@ ${paths}  </svg>
         cypherCount, cypherLimit,
         cypherWarning: cypherLimit > 0 && cypherCount > cypherLimit,
         recoveryAvailable,
-        recoveryTotal
+        recoveryTotal,
+        recoveryRolls,
+        activeEffects
       };
     });
   }
@@ -5404,6 +6908,48 @@ ${paths}  </svg>
       <div class="cgm-panel-header"><i class="fas fa-mask"></i> NPCs</div>
       <div class="cgm-npc-list">
         ${npcs.length ? npcs.map(npc => `<div class="cgm-npc-item" data-actor-id="${npc.id}"><img src="${npc.img || 'icons/svg/mystery-man.svg'}" alt=""><span class="cgm-npc-name">${npc.name}</span><span class="cgm-npc-level">Lvl ${npc.system?.basic?.level ?? npc.system?.level ?? "—"}</span></div>`).join("") : `<div class="cgm-panel-empty">No NPCs found.</div>`}
+      </div>
+    `;
+  }
+
+  _buildItemsPanel() {
+    const items = game.items.contents.sort((a, b) => a.name.localeCompare(b.name));
+    const types = {};
+    items.forEach(item => {
+      const t = item.type || 'unknown';
+      if (!types[t]) types[t] = [];
+      types[t].push(item);
+    });
+    const typeOrder = ['ability', 'skill', 'attack', 'armor', 'cypher', 'artifact', 'equipment', 'ammo', 'cyphersystem', 'material', 'oddity'];
+    const sortedTypes = Object.keys(types).sort((a, b) => {
+      const ia = typeOrder.indexOf(a);
+      const ib = typeOrder.indexOf(b);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return a.localeCompare(b);
+    });
+
+    return `
+      <div class="cgm-panel-header"><i class="fas fa-hammer"></i> Items</div>
+      <div class="cgm-items-browser">
+        ${sortedTypes.map(type => `
+          <div class="cgm-items-type-group">
+            <div class="cgm-items-type-header">${type.charAt(0).toUpperCase() + type.slice(1)} (${types[type].length})</div>
+            <div class="cgm-items-type-list">
+              ${types[type].map(item => {
+                const level = item.system?.basic?.level ?? item.system?.level ?? null;
+                const levelText = level !== null ? ` • Lvl ${level}` : '';
+                return `<div class="cgm-items-browser-row" data-item-id="${item.id}" title="${this._escapeHTML(item.name)}">
+                  <img src="${item.img || 'icons/svg/item-bag.svg'}" alt="">
+                  <span class="cgm-items-browser-name">${item.name}</span>
+                  <span class="cgm-items-browser-meta">${type}${levelText}</span>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>
+        `).join('')}
+        ${items.length === 0 ? '<div class="cgm-panel-empty">No items found.</div>' : ''}
       </div>
     `;
   }
@@ -5708,6 +7254,40 @@ ${paths}  </svg>
           <span class="cgm-slider-val">${this._sections[2].bgOpacity}%</span>
         </div>
 
+        <!-- SECTION 4: Tray -->
+        <div class="cgm-setting-section-title" data-section-name-title="3">${this._sections[3].name}</div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Name</span>
+          <input type="text" class="cgm-text-input" data-action="setSectionName" data-section="3" value="${this._sections[3].name}" maxlength="20" style="width:120px;">
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Label Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionLabelColor" data-section="3" value="${this._sections[3].labelColor || this._sectionLabelColor || '#c8a96e'}">
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Position Offset</span>
+          <input type="range" min="0" max="200" value="${this._sections[3].position ?? 0}" class="cgm-slider" data-action="setSectionPosition" data-section="3">
+          <span class="cgm-slider-val">${this._sections[3].position ?? 0}px</span>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Width</span>
+          <input type="range" min="5" max="50" value="${this._sections[3].width}" class="cgm-slider" data-action="setSectionWidth" data-section="3">
+          <span class="cgm-slider-val">${this._sections[3].width}%</span>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Background Color</span>
+          <div class="cgm-color-picker-wrap">
+            <input type="color" class="cgm-color-picker" data-action="setSectionColor" data-section="3" value="${this._sections[3].bgColor}">
+          </div>
+        </div>
+        <div class="cgm-setting-row">
+          <span class="cgm-setting-label">Background Opacity</span>
+          <input type="range" min="0" max="100" value="${this._sections[3].bgOpacity}" class="cgm-slider" data-action="setSectionOpacity" data-section="3">
+          <span class="cgm-slider-val">${this._sections[3].bgOpacity}%</span>
+        </div>
+
         ${this._buildHiddenIconsHTML()}
       </div>
     `;
@@ -5858,6 +7438,22 @@ ${paths}  </svg>
       window.cypherNPCCanvas.toggle();
     });
 
+    // Enemy Canvas button
+    this.element.querySelector('[data-action="openEnemyCanvas"]')?.addEventListener("click", () => {
+      if (!window.cypherEnemyCanvas) {
+        window.cypherEnemyCanvas = new EnemyCanvas();
+      }
+      window.cypherEnemyCanvas.toggle();
+    });
+
+    // Items Canvas button
+    this.element.querySelector('[data-action="openItemsCanvas"]')?.addEventListener("click", () => {
+      if (!window.cypherItemsCanvas) {
+        window.cypherItemsCanvas = new ItemsCanvas();
+      }
+      window.cypherItemsCanvas.toggle();
+    });
+
     // Quick Scene button
     this.element.querySelector('[data-action="openQuickScene"]')?.addEventListener("click", () => {
       if (!window.cypherQuickScene) {
@@ -5876,6 +7472,16 @@ ${paths}  </svg>
       } else {
         ui.notifications.warn("Cypher Log module is not active.");
       }
+    });
+
+    // Recovery button
+    this.element.querySelector('[data-action="openRecoveryMenu"]')?.addEventListener("click", (e) => {
+      this._showRecoveryTaskbarMenu(e.currentTarget);
+    });
+
+    // Reputation button
+    this.element.querySelector('[data-action="openReputation"]')?.addEventListener("click", (e) => {
+      this._toggleReputationPanel(e.currentTarget);
     });
   }
 
@@ -5934,6 +7540,11 @@ ${paths}  </svg>
       case "npcs":
         el.querySelectorAll(".cgm-npc-item").forEach(item => {
           item.addEventListener("click", () => { const actor = game.actors.get(item.dataset.actorId); if (actor) actor.sheet.render(true); });
+        });
+        break;
+      case "items":
+        el.querySelectorAll(".cgm-items-browser-row").forEach(item => {
+          item.addEventListener("click", () => { const it = game.items.get(item.dataset.itemId); if (it) it.sheet.render(true); });
         });
         break;
       case "notes":
@@ -5996,7 +7607,7 @@ ${paths}  </svg>
           input.addEventListener("input", async (e) => {
             const idx = parseInt(e.target.dataset.section);
             this._sections[idx].width = parseInt(e.target.value);
-            const key = idx === 0 ? "sectionWidth" : idx === 1 ? "section2Width" : "section3Width";
+            const key = idx === 0 ? "sectionWidth" : idx === 1 ? "section2Width" : idx === 2 ? "section3Width" : "section4Width";
             await this._ss(key, this._sections[idx].width);
             const vd = e.target.nextElementSibling;
             if (vd) vd.textContent = `${this._sections[idx].width}%`;
@@ -6007,7 +7618,7 @@ ${paths}  </svg>
           input.addEventListener("input", async (e) => {
             const idx = parseInt(e.target.dataset.section);
             this._sections[idx].bgColor = e.target.value;
-            const key = idx === 0 ? "sectionBgColor" : idx === 1 ? "section2BgColor" : "section3BgColor";
+            const key = idx === 0 ? "sectionBgColor" : idx === 1 ? "section2BgColor" : idx === 2 ? "section3BgColor" : "section4BgColor";
             await this._ss(key, this._sections[idx].bgColor);
             _updateSectionStyle(idx);
           });
@@ -6016,7 +7627,7 @@ ${paths}  </svg>
           input.addEventListener("input", async (e) => {
             const idx = parseInt(e.target.dataset.section);
             this._sections[idx].bgOpacity = parseInt(e.target.value);
-            const key = idx === 0 ? "sectionBgOpacity" : idx === 1 ? "section2BgOpacity" : "section3BgOpacity";
+            const key = idx === 0 ? "sectionBgOpacity" : idx === 1 ? "section2BgOpacity" : idx === 2 ? "section3BgOpacity" : "section4BgOpacity";
             await this._ss(key, this._sections[idx].bgOpacity);
             const vd = e.target.nextElementSibling;
             if (vd) vd.textContent = `${this._sections[idx].bgOpacity}%`;
@@ -6042,7 +7653,7 @@ ${paths}  </svg>
               // Per-section label color
               const idx = parseInt(sectionIdx);
               this._sections[idx].labelColor = e.target.value;
-              const key = idx === 0 ? "section1LabelColor" : idx === 1 ? "section2LabelColor" : "section3LabelColor";
+              const key = idx === 0 ? "section1LabelColor" : idx === 1 ? "section2LabelColor" : idx === 2 ? "section3LabelColor" : "section4LabelColor";
               await this._ss(key, this._sections[idx].labelColor);
               // Update only this section's label badge
               const sectionEls = this.element?.querySelectorAll('.cgm-custom-section');
@@ -6083,7 +7694,7 @@ ${paths}  </svg>
             const name = e.target.value.trim() || `SECTION ${idx + 1}`;
             this._sections[idx].name = name;
             // Update names array
-            if (!Array.isArray(this._sectionNames)) this._sectionNames = ["SECTION 1", "SECTION 2", "SECTION 3"];
+            if (!Array.isArray(this._sectionNames)) this._sectionNames = ["SECTION 1", "SECTION 2", "SECTION 3", "TRAY"];
             this._sectionNames[idx] = name;
             await this._ss("sectionNames", this._sectionNames);
             // Update label badge on taskbar
@@ -6105,7 +7716,7 @@ ${paths}  </svg>
             const idx = parseInt(e.target.dataset.section);
             const val = parseInt(e.target.value);
             this._sections[idx].position = val;
-            const key = idx === 0 ? "sectionPosition" : idx === 1 ? "section2Position" : "section3Position";
+            const key = idx === 0 ? "sectionPosition" : idx === 1 ? "section2Position" : idx === 2 ? "section3Position" : "section4Position";
             await this._ss(key, val);
             const vd = e.target.nextElementSibling;
             if (vd) vd.textContent = `${val}px`;
@@ -6548,13 +8159,24 @@ ${paths}  </svg>
         if (!btnId) return;
 
         const layout = this._getButtonLayout();
-        if (!layout[btnId]) return;
 
-        // Check if this is an injected/dynamic button
-        const btnDef = this._getButtonDefs().find(b => b.id === btnId);
-        const isInjected = btnDef?.isDynamic === true;
+        // If button not in layout yet (e.g. undiscovered dynamic), create entry
+        if (!layout[btnId]) {
+          const btnDef = this._getButtonDefs().find(b => b.id === btnId);
+          if (btnDef) {
+            layout[btnId] = {
+              section: btnDef.defaultSection,
+              size: 16,
+              color: btnDef.color || "",
+              hidden: false
+            };
+          } else {
+            console.warn(`${MODULE_ID} | Dropped button "${btnId}" not found in button definitions`);
+            return;
+          }
+        }
 
-        // Move the DOM element directly — works for both static and injected buttons
+        // Move the DOM element directly
         const btnEl = this.element?.querySelector(`.cgm-section-btn[data-btn-id="${btnId}"]`);
         if (btnEl) {
           const targetContent = sec.querySelector('.cgm-section-buttons');
@@ -6566,6 +8188,50 @@ ${paths}  </svg>
         layout[btnId].section = idx;
         this._buttonLayout = layout;
         await this._ss("buttonLayout", layout);
+        // Also capture the new button order within sections
+        this._saveButtonOrder();
+      });
+    });
+  }
+
+  /**
+   * Capture the current DOM order of buttons inside each section
+   * and persist it so reordering survives re-renders.
+   */
+  _saveButtonOrder() {
+    const bar = document.querySelector(`#${MODULE_ID}-bar`);
+    if (!bar) return;
+    const layout = foundry.utils.deepClone(this._buttonLayout || {});
+    const sections = bar.querySelectorAll('.cgm-custom-section');
+    sections.forEach((sec, secIdx) => {
+      const buttons = sec.querySelectorAll('.cgm-section-btn[data-btn-id]');
+      const order = [];
+      buttons.forEach(btn => order.push(btn.dataset.btnId));
+      // Store order array on a dedicated key per section
+      layout[`_order_${secIdx}`] = order;
+    });
+    this._buttonLayout = layout;
+    this._ss("buttonLayout", layout);
+  }
+
+  /**
+   * After render, restore the saved button order within each section
+   * by re-appending elements in the persisted sequence.
+   */
+  _restoreButtonOrder() {
+    const bar = document.querySelector(`#${MODULE_ID}-bar`);
+    if (!bar) return;
+    const layout = this._buttonLayout || {};
+    const sections = bar.querySelectorAll('.cgm-custom-section');
+    sections.forEach((sec, secIdx) => {
+      const container = sec.querySelector('.cgm-section-buttons');
+      if (!container) return;
+      const savedOrder = layout[`_order_${secIdx}`];
+      if (!savedOrder || !Array.isArray(savedOrder)) return;
+      // Re-append in saved order so they end up in correct sequence
+      savedOrder.forEach(btnId => {
+        const btn = container.querySelector(`.cgm-section-btn[data-btn-id="${btnId}"]`);
+        if (btn) container.appendChild(btn);
       });
     });
   }
@@ -6866,6 +8532,973 @@ ${paths}  </svg>
     this.element.classList.toggle("cgm-compact", this._compact);
     if (!this._locked) { this.element.classList.add("cgm-autohide"); }
   }
+
+  /* ═══════════════════════════════════════════════════════════
+     VALUES PANELS — Cash & Values, Assets, Items
+     ═══════════════════════════════════════════════════════════ */
+
+  /* ─── Helper: resolve dropped item (from sidebar, compendium, or actor) ─── */
+  async _resolveDroppedItem(e, actor) {
+    let data;
+    try {
+      data = TextEditor.getDragEventData(e);
+    } catch (err) {
+      try { data = JSON.parse(e.dataTransfer.getData("text/plain")); } catch { return null; }
+    }
+    if (!data || data.type !== "Item") return null;
+
+    let item;
+    try {
+      item = await Item.implementation.fromDropData(data);
+    } catch { return null; }
+    if (!item) return null;
+
+    // Ensure item exists on actor; create if dragged from world/compendium
+    let actorItem = actor.items.get(item.id);
+    if (!actorItem) {
+      try {
+        const created = await actor.createEmbeddedDocuments("Item", [item.toObject()]);
+        actorItem = created?.[0];
+      } catch (err) {
+        console.warn(`${MODULE_ID} | Failed to create item on actor:`, err);
+        return null;
+      }
+    }
+    return actorItem || item;
+  }
+
+  /* ─── Helper: get item quantity (handles different Cypher System paths) ─── */
+  _getItemQuantity(item) {
+    if (!item) return 0;
+    // Get data from multiple sources for maximum compatibility
+    const sys = item.system || {};
+    const src = item.system?._source || item._source?.system || {};
+    const raw = item.toObject?.()?.system || {};
+
+    // Collect all possible quantity values
+    const candidates = [];
+    const add = (v) => { if (v !== undefined && v !== null) candidates.push(Number(v)); };
+
+    // Standard paths
+    add(sys.quantity); add(src.quantity); add(raw.quantity);
+    add(sys.amount); add(src.amount); add(raw.amount);
+    add(sys.count); add(src.count); add(raw.count);
+    add(sys.number); add(src.number); add(raw.number);
+
+    // Nested paths
+    add(sys.basic?.quantity); add(src.basic?.quantity); add(raw.basic?.quantity);
+    add(sys.basic?.amount); add(src.basic?.amount); add(raw.basic?.amount);
+    add(sys.settings?.quantity); add(src.settings?.quantity); add(raw.settings?.quantity);
+
+    // Ammo-specific paths
+    add(sys.ammo?.value); add(src.ammo?.value); add(raw.ammo?.value);
+    add(sys.ammo?.quantity); add(src.ammo?.quantity); add(raw.ammo?.quantity);
+    add(sys.ammo?.current); add(src.ammo?.current); add(raw.ammo?.current);
+    if (typeof sys.ammo === 'number') add(sys.ammo);
+    if (typeof src.ammo === 'number') add(src.ammo);
+    if (typeof raw.ammo === 'number') add(raw.ammo);
+
+    // Charge/uses paths
+    add(sys.charges?.value); add(src.charges?.value); add(raw.charges?.value);
+    add(sys.charges?.current); add(src.charges?.current); add(raw.charges?.current);
+    add(sys.uses?.value); add(src.uses?.value); add(raw.uses?.value);
+    add(sys.uses?.current); add(src.uses?.current); add(raw.uses?.current);
+
+    // Return first valid number, default to 1
+    for (const n of candidates) {
+      if (!isNaN(n)) return n;
+    }
+    return 1;
+  }
+
+  /* ─── Helper: set item quantity (handles different Cypher System paths) ─── */
+  async _setItemQuantity(item, newQty) {
+    if (!item) return;
+    const qty = Math.max(0, Number(newQty) || 0);
+    const sys = item.system || {};
+    const src = item.system?._source || item._source?.system || {};
+    const raw = item.toObject?.()?.system || {};
+
+    // Determine which path to update by checking what exists
+    let updatePath = null;
+
+    // Ammo paths
+    if (src.ammo?.value !== undefined || sys.ammo?.value !== undefined || raw.ammo?.value !== undefined)
+      updatePath = "system.ammo.value";
+    else if (src.ammo?.quantity !== undefined || sys.ammo?.quantity !== undefined || raw.ammo?.quantity !== undefined)
+      updatePath = "system.ammo.quantity";
+    else if (src.ammo?.current !== undefined || sys.ammo?.current !== undefined || raw.ammo?.current !== undefined)
+      updatePath = "system.ammo.current";
+    else if (typeof src.ammo === 'number' || typeof sys.ammo === 'number' || typeof raw.ammo === 'number')
+      updatePath = "system.ammo";
+    // Standard quantity
+    else if (src.quantity !== undefined || sys.quantity !== undefined || raw.quantity !== undefined)
+      updatePath = "system.quantity";
+    else if (src.amount !== undefined || sys.amount !== undefined || raw.amount !== undefined)
+      updatePath = "system.amount";
+    else if (src.basic?.quantity !== undefined || sys.basic?.quantity !== undefined || raw.basic?.quantity !== undefined)
+      updatePath = "system.basic.quantity";
+    else if (src.basic?.amount !== undefined || sys.basic?.amount !== undefined || raw.basic?.amount !== undefined)
+      updatePath = "system.basic.amount";
+    else if (src.count !== undefined || sys.count !== undefined || raw.count !== undefined)
+      updatePath = "system.count";
+    else if (src.number !== undefined || sys.number !== undefined || raw.number !== undefined)
+      updatePath = "system.number";
+    // Charges/uses
+    else if (src.charges?.value !== undefined || sys.charges?.value !== undefined || raw.charges?.value !== undefined)
+      updatePath = "system.charges.value";
+    else if (src.uses?.value !== undefined || sys.uses?.value !== undefined || raw.uses?.value !== undefined)
+      updatePath = "system.uses.value";
+
+    if (updatePath) {
+      await item.update({ [updatePath]: qty });
+    } else {
+      // Last resort: create system.quantity
+      await item.update({ "system.quantity": qty });
+    }
+  }
+  _showCashValuesPanel(actorId, wrapEl) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const name = actor.name;
+
+    // Read money from actor flag, falling back to Cypher System currency
+    let money = actor.getFlag("cypher-taskbar", "cashMoney");
+    if (!money) {
+      const sysCur = actor.system?.equipment?.currency;
+      if (sysCur?.active) {
+        money = {
+          cp: sysCur.quantity1 ?? 0,
+          sp: sysCur.quantity2 ?? 0,
+          gp: sysCur.quantity3 ?? 0,
+          pp: sysCur.quantity4 ?? 0
+        };
+      } else {
+        money = { cp: 0, sp: 0, gp: 0, pp: 0 };
+      }
+    }
+    const { cp = 0, sp = 0, gp = 0, pp = 0 } = money;
+
+    // Get carriable valuables
+    const valuableIds = actor.getFlag("cypher-taskbar", "cashValuables") ?? [];
+    const valuables = valuableIds
+      .map(id => actor.items.get(id))
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    // Clean up missing items
+    if (valuables.length !== valuableIds.length) {
+      const validIds = valuables.map(i => i.id);
+      actor.setFlag("cypher-taskbar", "cashValuables", validIds);
+    }
+
+    const panelW = 300;
+    const panelH = 380;
+
+    const { panel, lineContainer } = this._createConnectedPanel(wrapEl, 3, 9, panelW, panelH, "cgm-cash-values-panel", "fa-coins", `Cash & Values: ${name}`, "rgba(212,169,77,0.7)");
+    this._cashValuesPanelEl = panel;
+
+    const moneyRow = `
+      <div class="cgm-cash-money-section">
+        <div class="cgm-cash-section-title"><i class="fas fa-coins"></i> MONEY</div>
+        <div class="cgm-cash-money-row">
+          <div class="cgm-cash-coin">
+            <label class="cgm-cash-coin-label">CP</label>
+            <input type="number" class="cgm-cash-input" id="cgm-cash-cp" value="${cp}" min="0">
+            <div class="cgm-cash-coin-btns">
+              <button type="button" class="cgm-cash-coin-btn" data-cash-minus="cp" title="-1"><i class="fas fa-minus"></i></button>
+              <button type="button" class="cgm-cash-coin-btn" data-cash-plus="cp" title="+1"><i class="fas fa-plus"></i></button>
+            </div>
+          </div>
+          <div class="cgm-cash-coin">
+            <label class="cgm-cash-coin-label">SP</label>
+            <input type="number" class="cgm-cash-input" id="cgm-cash-sp" value="${sp}" min="0">
+            <div class="cgm-cash-coin-btns">
+              <button type="button" class="cgm-cash-coin-btn" data-cash-minus="sp" title="-1"><i class="fas fa-minus"></i></button>
+              <button type="button" class="cgm-cash-coin-btn" data-cash-plus="sp" title="+1"><i class="fas fa-plus"></i></button>
+            </div>
+          </div>
+          <div class="cgm-cash-coin">
+            <label class="cgm-cash-coin-label">GP</label>
+            <input type="number" class="cgm-cash-input" id="cgm-cash-gp" value="${gp}" min="0">
+            <div class="cgm-cash-coin-btns">
+              <button type="button" class="cgm-cash-coin-btn" data-cash-minus="gp" title="-1"><i class="fas fa-minus"></i></button>
+              <button type="button" class="cgm-cash-coin-btn" data-cash-plus="gp" title="+1"><i class="fas fa-plus"></i></button>
+            </div>
+          </div>
+          <div class="cgm-cash-coin">
+            <label class="cgm-cash-coin-label">PP</label>
+            <input type="number" class="cgm-cash-input" id="cgm-cash-pp" value="${pp}" min="0">
+            <div class="cgm-cash-coin-btns">
+              <button type="button" class="cgm-cash-coin-btn" data-cash-minus="pp" title="-1"><i class="fas fa-minus"></i></button>
+              <button type="button" class="cgm-cash-coin-btn" data-cash-plus="pp" title="+1"><i class="fas fa-plus"></i></button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+
+    const valuablesGrid = valuables.length
+      ? valuables.map(i => `
+        <div class="cgm-cash-valuable-item" data-cash-valuable="${i.id}" title="${foundry.utils.escapeHTML(i.name)}">
+          <img src="${i.img || 'icons/svg/item-bag.svg'}" alt="" draggable="false">
+        </div>`).join("")
+      : `<div class="cgm-cash-valuables-empty"><i class="fas fa-hand-holding"></i><span>Drop valuable items here</span></div>`;
+
+    panel.querySelector('.cgm-connected-panel-body').innerHTML = `
+      ${moneyRow}
+      <div class="cgm-cash-valuables-section">
+        <div class="cgm-cash-section-title"><i class="fas fa-gem"></i> CARRIABLE VALUES</div>
+        <div class="cgm-cash-valuables-grid" data-cash-dropzone>
+          ${valuablesGrid}
+        </div>
+      </div>
+    `;
+
+    this._makePanelDraggable(panel, "_cashValuesLineStart", "_cashValuesPanelPos");
+
+    // Close button only — no click-outside
+    panel.querySelector(".cgm-connected-panel-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._hideCashValuesPanel();
+    });
+
+    // Coin +/- handlers
+    panel.querySelectorAll("[data-cash-plus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const type = btn.dataset.cashPlus;
+        const input = panel.querySelector(`#cgm-cash-${type}`);
+        if (!input) return;
+        const val = Math.max(0, parseInt(input.value, 10) || 0);
+        input.value = val + 1;
+        await this._saveCashMoney(actor, panel);
+      });
+    });
+    panel.querySelectorAll("[data-cash-minus]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const type = btn.dataset.cashMinus;
+        const input = panel.querySelector(`#cgm-cash-${type}`);
+        if (!input) return;
+        const val = Math.max(0, parseInt(input.value, 10) || 0);
+        input.value = Math.max(0, val - 1);
+        await this._saveCashMoney(actor, panel);
+      });
+    });
+    // Input change
+    panel.querySelectorAll(".cgm-cash-input").forEach(input => {
+      input.addEventListener("change", async () => {
+        await this._saveCashMoney(actor, panel);
+      });
+    });
+
+    // Drop zone for valuables
+    const dropzone = panel.querySelector("[data-cash-dropzone]");
+    if (dropzone) {
+      dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("cgm-dragover"); });
+      dropzone.addEventListener("dragleave", () => dropzone.classList.remove("cgm-dragover"));
+      dropzone.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("cgm-dragover");
+        const item = await this._resolveDroppedItem(e, actor);
+        if (!item) return;
+        const existing = actor.getFlag("cypher-taskbar", "cashValuables") ?? [];
+        if (existing.includes(item.id)) {
+          ui.notifications.warn(`${item.name} is already in carriable values.`);
+          return;
+        }
+        await actor.setFlag("cypher-taskbar", "cashValuables", [...existing, item.id]);
+        ui.notifications.info(`Added ${item.name} to carriable values.`);
+        this._hideCashValuesPanel();
+        this._showCashValuesPanel(actorId, wrapEl);
+      });
+    }
+  }
+
+  async _saveCashMoney(actor, panel) {
+    const cp = Math.max(0, parseInt(panel.querySelector("#cgm-cash-cp")?.value, 10) || 0);
+    const sp = Math.max(0, parseInt(panel.querySelector("#cgm-cash-sp")?.value, 10) || 0);
+    const gp = Math.max(0, parseInt(panel.querySelector("#cgm-cash-gp")?.value, 10) || 0);
+    const pp = Math.max(0, parseInt(panel.querySelector("#cgm-cash-pp")?.value, 10) || 0);
+    await actor.setFlag("cypher-taskbar", "cashMoney", { cp, sp, gp, pp });
+    // Also sync to Cypher System currency if active
+    const sysCur = actor.system?.equipment?.currency;
+    if (sysCur?.active) {
+      await actor.update({
+        "system.equipment.currency.quantity1": cp,
+        "system.equipment.currency.quantity2": sp,
+        "system.equipment.currency.quantity3": gp,
+        "system.equipment.currency.quantity4": pp
+      });
+    }
+  }
+
+  _hideCashValuesPanel() {
+    if (this._cashValuesPanelEl) {
+      this._cashValuesPanelEl._cgmDragCleanup?.();
+      this._cashValuesPanelEl.classList.remove("cgm-connected-panel-visible");
+      setTimeout(() => { this._cashValuesPanelEl?.remove(); this._cashValuesPanelEl = null; }, 200);
+    }
+    if (this._connectingLineEl) {
+      this._connectingLineEl.remove();
+      this._connectingLineEl = null;
+    }
+  }
+
+  /* ─── Assets Panel ─── */
+  _showAssetsPanel(actorId, wrapEl) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const name = actor.name;
+
+    const assetIds = actor.getFlag("cypher-taskbar", "assetsItems") ?? [];
+    const assets = assetIds
+      .map(id => actor.items.get(id))
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    if (assets.length !== assetIds.length) {
+      const validIds = assets.map(i => i.id);
+      actor.setFlag("cypher-taskbar", "assetsItems", validIds);
+    }
+
+    const panelW = 280;
+    const panelH = 320;
+
+    const { panel, lineContainer } = this._createConnectedPanel(wrapEl, 3, 9, panelW, panelH, "cgm-assets-panel", "fa-landmark", `Assets: ${name}`, "rgba(200,169,110,0.7)");
+    this._assetsPanelEl = panel;
+
+    const assetsGrid = assets.length
+      ? assets.map(i => `
+        <div class="cgm-assets-card" data-assets-item="${i.id}" title="${foundry.utils.escapeHTML(i.name)}">
+          <img src="${i.img || 'icons/svg/item-bag.svg'}" alt="">
+          <span class="cgm-assets-name">${i.name}</span>
+        </div>`).join("")
+      : `<div class="cgm-assets-empty"><i class="fas fa-landmark"></i><span>Drop assets here</span></div>`;
+
+    panel.querySelector('.cgm-connected-panel-body').innerHTML = `
+      <div class="cgm-assets-grid" data-assets-dropzone>
+        ${assetsGrid}
+      </div>
+    `;
+
+    this._makePanelDraggable(panel, "_assetsLineStart", "_assetsPanelPos");
+
+    panel.querySelector(".cgm-connected-panel-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._hideAssetsPanel();
+    });
+
+    // Drop zone
+    const dropzone = panel.querySelector("[data-assets-dropzone]");
+    if (dropzone) {
+      dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("cgm-dragover"); });
+      dropzone.addEventListener("dragleave", () => dropzone.classList.remove("cgm-dragover"));
+      dropzone.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("cgm-dragover");
+        const item = await this._resolveDroppedItem(e, actor);
+        if (!item) return;
+        const existing = actor.getFlag("cypher-taskbar", "assetsItems") ?? [];
+        if (existing.includes(item.id)) {
+          ui.notifications.warn(`${item.name} is already in assets.`);
+          return;
+        }
+        await actor.setFlag("cypher-taskbar", "assetsItems", [...existing, item.id]);
+        ui.notifications.info(`Added ${item.name} to assets.`);
+        this._hideAssetsPanel();
+        this._showAssetsPanel(actorId, wrapEl);
+      });
+    }
+  }
+
+  _hideAssetsPanel() {
+    if (this._assetsPanelEl) {
+      this._assetsPanelEl._cgmDragCleanup?.();
+      this._assetsPanelEl.classList.remove("cgm-connected-panel-visible");
+      setTimeout(() => { this._assetsPanelEl?.remove(); this._assetsPanelEl = null; }, 200);
+    }
+    if (this._connectingLineEl) {
+      this._connectingLineEl.remove();
+      this._connectingLineEl = null;
+    }
+  }
+
+  /* ─── Items Panel ─── */
+  _showItemsPanel(actorId, wrapEl, activeTab = "equipment", sortMode = "name") {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const name = actor.name;
+
+    // Determine which items to show based on tab
+    let items = [];
+    if (activeTab === "equipment") {
+      items = actor.items.filter(i => !["ability", "skill", "pool", "cypher", "artifact", "ammo"].includes(i.type));
+    } else if (activeTab === "cyphers") {
+      items = actor.items.filter(i => i.type === "cypher");
+    } else if (activeTab === "artifacts") {
+      items = actor.items.filter(i => i.type === "artifact");
+    } else if (activeTab === "ammo") {
+      items = actor.items.filter(i => i.type === "ammo");
+    }
+
+    // Sort
+    const sortFns = {
+      name:  (a, b) => a.name.localeCompare(b.name),
+      value: (a, b) => (a.system?.price?.value ?? a.system?.value ?? 0) - (b.system?.price?.value ?? b.system?.value ?? 0),
+      level: (a, b) => (a.system?.level ?? 0) - (b.system?.level ?? 0),
+      amount:(a, b) => this._getItemQuantity(a) - this._getItemQuantity(b),
+      time:  (a, b) => (a.sort ?? 0) - (b.sort ?? 0),
+    };
+    items = items.sort(sortFns[sortMode] || sortFns.name);
+
+    const defaultW = 320;
+    const defaultH = 420;
+    const maxH = Math.floor(window.innerHeight * 0.8);
+    const panelW = this._itemsPanelSize?.width  || defaultW;
+    let panelH = this._itemsPanelSize?.height || defaultH;
+    if (panelH > maxH) panelH = maxH;
+
+    // If panel already exists, just refresh content
+    const existingPanel = this._itemsPanelEl;
+    let panel;
+    if (existingPanel && existingPanel.dataset.actorId === actorId) {
+      panel = existingPanel;
+    } else {
+      if (existingPanel) this._hideItemsPanel();
+      const result = this._createConnectedPanel(wrapEl, 3, 9, panelW, panelH, "cgm-items-panel", "fa-box-open", `Items: ${name}`, "rgba(100,180,220,0.7)");
+      panel = result.panel;
+      this._itemsPanelEl = panel;
+      panel.dataset.actorId = actorId;
+
+      this._makePanelDraggable(panel, "_itemsLineStart", "_itemsPanelPos");
+      this._makePanelResizable(panel, "_itemsPanelSize", 260, 200, null, maxH);
+
+      panel.querySelector(".cgm-connected-panel-close")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._hideItemsPanel();
+      });
+    }
+
+    // Tab definitions
+    const tabs = [
+      { key: "equipment", label: "Equipment", icon: "fa-box" },
+      { key: "cyphers",   label: "Cyphers",   icon: "fa-flask" },
+      { key: "artifacts", label: "Artifacts", icon: "fa-gem" },
+      { key: "ammo",      label: "Ammo",      icon: "fa-bullseye" },
+    ];
+
+    const tabBar = tabs.map(t => `
+      <button class="cgm-items-tab ${activeTab === t.key ? 'active' : ''}" data-tab="${t.key}">
+        <i class="fas ${t.icon}"></i> ${t.label}
+      </button>
+    `).join("");
+
+    // Sort bar
+    const sortOptions = [
+      { key: "name",   label: "Name",   icon: "fa-font" },
+      { key: "value",  label: "Value",  icon: "fa-coins" },
+      { key: "level",  label: "Level",  icon: "fa-layer-group" },
+      { key: "amount", label: "Amount", icon: "fa-hashtag" },
+      { key: "time",   label: "Time",   icon: "fa-clock" },
+    ];
+    const sortBar = sortOptions.map(o => `
+      <button class="cgm-items-sort-btn ${sortMode === o.key ? 'active' : ''}" data-sort="${o.key}" title="Sort by ${o.label}">
+        <i class="fas ${o.icon}"></i> ${o.label}
+      </button>
+    `).join("");
+
+    // Item rows with quantity controls
+    const itemsList = items.length
+      ? items.map(i => {
+          const sys = i.system || {};
+          const qty = this._getItemQuantity(i);
+          const level = sys.level ?? "—";
+          const value = sys.price?.value ?? sys.value ?? "—";
+          // For ammo, show ammo-specific fields
+          const isAmmo = i.type === "ammo";
+          const meta = isAmmo
+            ? `Qty ${qty}`
+            : `Lv.${level} · Qty ${qty}${value !== "—" ? " · " + value : ""}`;
+          return `
+            <div class="cgm-items-row" data-cgm-item-id="${i.id}">
+              <img src="${i.img || 'icons/svg/item-bag.svg'}" alt="">
+              <div class="cgm-items-info">
+                <span class="cgm-items-name">${i.name}</span>
+                <span class="cgm-items-meta">${meta}</span>
+              </div>
+              <span class="cgm-items-type">${i.type}</span>
+              <div class="cgm-items-qty-controls">
+                <button class="cgm-items-add" data-add="${i.id}" title="Add one"><i class="fas fa-plus"></i></button>
+                <button class="cgm-items-delete" data-delete="${i.id}" title="Remove one"><i class="fas fa-trash"></i></button>
+              </div>
+            </div>`;
+        }).join("")
+      : `<div class="cgm-items-empty"><i class="fas fa-box-open"></i><span>No ${activeTab} items</span></div>`;
+
+    panel.querySelector('.cgm-connected-panel-body').innerHTML = `
+      <div class="cgm-items-tabs">${tabBar}</div>
+      <div class="cgm-items-sort-bar">${sortBar}</div>
+      <div class="cgm-items-list" data-items-dropzone>
+        ${itemsList}
+      </div>
+      <div class="cgm-items-resize-handle" title="Resize"></div>
+    `;
+
+    // Tab buttons
+    panel.querySelectorAll(".cgm-items-tab").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const newTab = btn.dataset.tab;
+        this._showItemsPanel(actorId, wrapEl, newTab, sortMode);
+      });
+    });
+
+    // Sort buttons
+    panel.querySelectorAll(".cgm-items-sort-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const newSort = btn.dataset.sort;
+        this._showItemsPanel(actorId, wrapEl, activeTab, newSort);
+      });
+    });
+
+    // Add buttons
+    panel.querySelectorAll(".cgm-items-add").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const itemId = btn.dataset.add;
+        const item = actor.items.get(itemId);
+        if (!item) return;
+        const qty = this._getItemQuantity(item);
+        await this._setItemQuantity(item, qty + 1);
+        ui.notifications.info(`Increased ${item.name} quantity to ${qty + 1}.`);
+        this._showItemsPanel(actorId, wrapEl, activeTab, sortMode);
+      });
+    });
+
+    // Delete buttons
+    panel.querySelectorAll(".cgm-items-delete").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const itemId = btn.dataset.delete;
+        const item = actor.items.get(itemId);
+        if (!item) return;
+        const qty = this._getItemQuantity(item);
+        if (qty > 1) {
+          await this._setItemQuantity(item, qty - 1);
+          ui.notifications.info(`Reduced ${item.name} quantity to ${qty - 1}.`);
+        } else {
+          await item.delete();
+          ui.notifications.info(`Removed ${item.name}.`);
+        }
+        this._showItemsPanel(actorId, wrapEl, activeTab, sortMode);
+      });
+    });
+
+    // Drop zone — add item to actor
+    const dropzone = panel.querySelector("[data-items-dropzone]");
+    if (dropzone) {
+      dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("cgm-dragover"); });
+      dropzone.addEventListener("dragleave", () => dropzone.classList.remove("cgm-dragover"));
+      dropzone.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("cgm-dragover");
+        const item = await this._resolveDroppedItem(e, actor);
+        if (!item) return;
+        if (actor.items.get(item.id)) {
+          ui.notifications.warn(`${actor.name} already has ${item.name}.`);
+          return;
+        }
+        await actor.createEmbeddedDocuments("Item", [item.toObject()]);
+        ui.notifications.info(`Added ${item.name} to ${actor.name}.`);
+        this._showItemsPanel(actorId, wrapEl, activeTab, sortMode);
+      });
+    }
+
+    // Click to open item sheet
+    panel.querySelectorAll(".cgm-items-row").forEach(row => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".cgm-items-delete") || e.target.closest(".cgm-items-add")) return;
+        const item = actor.items.get(row.dataset.cgmItemId);
+        if (item) item.sheet.render(true);
+      });
+    });
+
+    // Fancy HTML tooltip on hover
+    panel.querySelectorAll(".cgm-items-row").forEach(row => {
+      row.addEventListener("mouseenter", (e) => {
+        const item = actor.items.get(row.dataset.cgmItemId);
+        if (item) {
+          const desc = item.system?.description || "";
+          if (desc) this._showItemTooltip(row, desc);
+        }
+      });
+      row.addEventListener("mouseleave", () => {
+        this._hideItemTooltip();
+      });
+    });
+  }
+
+  /* ─── Fancy Item Tooltip ─── */
+  _showItemTooltip(targetEl, html) {
+    this._hideItemTooltip();
+    if (!html || html.trim() === "") return;
+
+    const tooltip = document.createElement("div");
+    tooltip.className = "cgm-item-tooltip";
+    tooltip.innerHTML = `
+      <div class="cgm-item-tooltip-body">${html}</div>
+    `;
+    document.body.appendChild(tooltip);
+    this._itemTooltipEl = tooltip;
+
+    const rect = targetEl.getBoundingClientRect();
+    const tRect = tooltip.getBoundingClientRect();
+    let left = rect.right + 8;
+    let top = rect.top;
+    if (left + tRect.width > window.innerWidth - 8) {
+      left = rect.left - tRect.width - 8;
+    }
+    if (top + tRect.height > window.innerHeight - 8) {
+      top = window.innerHeight - tRect.height - 8;
+    }
+    if (top < 8) top = 8;
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    tooltip.classList.add("cgm-item-tooltip-visible");
+
+    tooltip.addEventListener("mouseenter", () => {});
+    tooltip.addEventListener("mouseleave", () => this._hideItemTooltip());
+  }
+
+  _hideItemTooltip() {
+    if (this._itemTooltipEl) {
+      this._itemTooltipEl.remove();
+      this._itemTooltipEl = null;
+    }
+  }
+
+  _hideItemsPanel() {
+    if (this._itemsPanelEl) {
+      this._itemsPanelEl._cgmDragCleanup?.();
+      this._itemsPanelEl.classList.remove("cgm-connected-panel-visible");
+      setTimeout(() => { this._itemsPanelEl?.remove(); this._itemsPanelEl = null; }, 200);
+    }
+    if (this._connectingLineEl) {
+      this._connectingLineEl.remove();
+      this._connectingLineEl = null;
+    }
+  }
+
+  /* ─── Drop Item Panel — quick drag-and-drop to equip ─── */
+  _showDropItemPanel(actorId, wrapEl) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const name = actor.name;
+
+    const panelW = 280;
+    const panelH = 240;
+
+    const { panel, lineContainer } = this._createConnectedPanel(wrapEl, 3, 9, panelW, panelH, "cgm-drop-item-panel", "fa-hand-holding-medical", `Drop Item: ${name}`, "rgba(110,207,122,0.7)");
+    this._dropItemPanelEl = panel;
+
+    panel.querySelector('.cgm-connected-panel-body').innerHTML = `
+      <div class="cgm-drop-item-zone" data-drop-item-zone>
+        <i class="fas fa-hand-holding-medical"></i>
+        <span>Drop an item here to add it to ${name}'s equipment</span>
+      </div>
+    `;
+
+    this._makePanelDraggable(panel, "_itemsLineStart", "_itemsPanelPos");
+
+    panel.querySelector(".cgm-connected-panel-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._hideDropItemPanel();
+    });
+
+    const dropzone = panel.querySelector("[data-drop-item-zone]");
+    if (dropzone) {
+      dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("cgm-dragover"); });
+      dropzone.addEventListener("dragleave", () => dropzone.classList.remove("cgm-dragover"));
+      dropzone.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("cgm-dragover");
+        const item = await this._resolveDroppedItem(e, actor);
+        if (!item) return;
+        if (actor.items.get(item.id)) {
+          ui.notifications.warn(`${actor.name} already has ${item.name}.`);
+          return;
+        }
+        await actor.createEmbeddedDocuments("Item", [item.toObject()]);
+        ui.notifications.info(`Added ${item.name} to ${actor.name}.`);
+        this._hideDropItemPanel();
+      });
+    }
+  }
+
+  _hideDropItemPanel() {
+    if (this._dropItemPanelEl) {
+      this._dropItemPanelEl._cgmDragCleanup?.();
+      this._dropItemPanelEl.classList.remove("cgm-connected-panel-visible");
+      setTimeout(() => { this._dropItemPanelEl?.remove(); this._dropItemPanelEl = null; }, 200);
+    }
+    if (this._connectingLineEl) {
+      this._connectingLineEl.remove();
+      this._connectingLineEl = null;
+    }
+  }
+
+  /* ─── Helper: create connected panel with line ─── */
+  _createConnectedPanel(wrapEl, sliceIndex, segCount, panelW, panelH, panelClass, iconClass, title, lineColor) {
+    const rect = wrapEl.getBoundingClientRect();
+    const portraitCx = rect.left + rect.width / 2;
+    const portraitCy = rect.top + rect.height / 2;
+    const size = this._radialMenuSize;
+    const offset = this._radialMenuOffset;
+
+    const spaceAbove = portraitCy - size / 2;
+    const spaceBelow = window.innerHeight - portraitCy - size / 2;
+    let mainCy;
+    if (spaceAbove >= size + offset && spaceAbove >= spaceBelow) {
+      mainCy = rect.top - offset - size / 2;
+    } else if (spaceBelow >= size + offset) {
+      mainCy = rect.bottom + offset + size / 2;
+    } else if (spaceAbove >= size + offset) {
+      mainCy = rect.top - offset - size / 2;
+    } else {
+      mainCy = window.innerHeight / 2;
+    }
+    const mainCx = portraitCx;
+    const mainR = size / 2;
+    const clampedCx = Math.max(mainR + 8, Math.min(mainCx, window.innerWidth - mainR - 8));
+    const clampedCy = Math.max(mainR + 8, Math.min(mainCy, window.innerHeight - mainR - 8));
+
+    const sliceAngle = (sliceIndex + 0.5) * (360 / segCount);
+    const sliceRad = (sliceAngle - 90) * Math.PI / 180;
+    const lineStartR = mainR - 4;
+    const lineLength = 80;
+    const lineEndR = lineStartR + lineLength;
+
+    const startX = clampedCx + Math.cos(sliceRad) * lineStartR;
+    const startY = clampedCy + Math.sin(sliceRad) * lineStartR;
+    let defX = clampedCx + Math.cos(sliceRad) * lineEndR;
+    let defY = clampedCy + Math.sin(sliceRad) * lineEndR;
+
+    defX = Math.max(panelW / 2 + 8, Math.min(defX, window.innerWidth - panelW / 2 - 8));
+    defY = Math.max(panelH / 2 + 8, Math.min(defY, window.innerHeight - panelH / 2 - 8));
+
+    let panelLeft, panelTop;
+    const posKey = panelClass.replace("cgm-", "").replace("-panel", "");
+    const savedPos = this[`_${posKey}PanelPos`];
+    if (savedPos) {
+      const clamped = this._clampPanelPos(savedPos.left, savedPos.top, panelW, panelH);
+      panelLeft = clamped.left;
+      panelTop = clamped.top;
+      this[`_${posKey}PanelPos`] = clamped;
+    } else {
+      panelLeft = defX - panelW / 2;
+      panelTop = defY - panelH / 2;
+    }
+    const lineEndX = panelLeft + panelW / 2;
+    const lineEndY = panelTop + panelH / 2;
+
+    // Draw connecting line
+    const lineContainer = document.createElement("div");
+    lineContainer.className = "cgm-status-line-container";
+    lineContainer.style.cssText = `position:fixed;left:0;top:0;width:100%;height:100%;z-index:201;pointer-events:none;`;
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("class", "cgm-status-line-svg");
+    svg.style.cssText = `position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible;`;
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", startX); line.setAttribute("y1", startY);
+    line.setAttribute("x2", lineEndX); line.setAttribute("y2", lineEndY);
+    line.setAttribute("class", "cgm-status-line");
+    line.setAttribute("stroke", lineColor);
+    svg.appendChild(line);
+    const glowLine = document.createElementNS(svgNS, "line");
+    glowLine.setAttribute("x1", startX); glowLine.setAttribute("y1", startY);
+    glowLine.setAttribute("x2", lineEndX); glowLine.setAttribute("y2", lineEndY);
+    glowLine.setAttribute("class", "cgm-status-line-glow");
+    glowLine.setAttribute("stroke", lineColor.replace(/[\d.]+\)$/, "0.3)"));
+    svg.appendChild(glowLine);
+    lineContainer.appendChild(svg);
+    document.body.appendChild(lineContainer);
+    this._connectingLineEl = lineContainer;
+
+    requestAnimationFrame(() => lineContainer.classList.add("cgm-status-line-visible"));
+
+    // Build panel
+    const panel = document.createElement("div");
+    panel.className = `cgm-connected-panel ${panelClass}`;
+    panel.style.cssText = `position:fixed;left:${panelLeft}px;top:${panelTop}px;width:${panelW}px;min-height:${panelH}px;z-index:202;`;
+
+    panel.innerHTML = `
+      <div class="cgm-connected-panel-header">
+        <i class="fas ${iconClass}"></i>
+        <span>${title}</span>
+        <button class="cgm-connected-panel-close"><i class="fas fa-xmark"></i></button>
+      </div>
+      <div class="cgm-connected-panel-body"></div>
+    `;
+
+    document.body.appendChild(panel);
+    panel.offsetHeight;
+    requestAnimationFrame(() => requestAnimationFrame(() => panel.classList.add("cgm-connected-panel-visible")));
+
+    return { panel, lineContainer };
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════
+     SECTION 4: MINIMIZED WINDOW TRAY
+     ═══════════════════════════════════════════════════════════════ */
+
+  _buildTrayHTML() {
+    return `<div class="cgm-tray-inner" id="cgm-tray-inner"><span class="cgm-tray-empty">—</span></div>`;
+  }
+
+  _startTray() {
+    this.refreshTray();
+    if (this._trayInterval) clearInterval(this._trayInterval);
+    this._trayInterval = setInterval(() => this.refreshTray(), 2000);
+  }
+
+  refreshTray() {
+    const tray = this.element?.querySelector("#cgm-tray-inner");
+    if (!tray) return;
+    this._trayApps.clear();
+
+    const tracked = [];
+    let idx = 0;
+
+    // V1 apps
+    for (const [id, app] of Object.entries(ui.windows ?? {})) {
+      if (!app) continue;
+      if (!this._isGameContentWindow(app)) continue;
+      const tid = `t${idx++}`;
+      this._trayApps.set(tid, app);
+      tracked.push({ tid, title: app.title ?? app.options?.title ?? "Window", minimized: this._isWindowMinimized(app) });
+    }
+
+    // V2 apps
+    if (foundry?.applications?.instances) {
+      for (const [id, app] of foundry.applications.instances) {
+        if (!app) continue;
+        let already = false;
+        for (const existing of this._trayApps.values()) { if (existing === app) { already = true; break; } }
+        if (already) continue;
+        if (!this._isGameContentWindow(app)) continue;
+        const tid = `t${idx++}`;
+        this._trayApps.set(tid, app);
+        tracked.push({ tid, title: app.title ?? "Window", minimized: this._isWindowMinimized(app) });
+      }
+    }
+
+    if (tracked.length === 0) {
+      tray.innerHTML = `<span class="cgm-tray-empty">—</span>`;
+      return;
+    }
+
+    tray.innerHTML = tracked.map(w => {
+      const icon = w.minimized ? "fa-window-restore" : "fa-window-minimize";
+      const tip  = w.minimized ? `Restore ${w.title}` : `Minimize ${w.title}`;
+      const cls  = w.minimized ? " cgm-tray-window-minimized" : "";
+      const label = w.title.substring(0, 16) + (w.title.length > 16 ? "…" : "");
+      return `<div class="cgm-tray-window-btn${cls}" data-tid="${w.tid}" title="${tip}"><i class="fas ${icon}"></i><span class="cgm-tray-window-label">${label}</span><button class="cgm-tray-window-close" data-tid="${w.tid}" title="Close"><i class="fas fa-times"></i></button></div>`;
+    }).join("");
+
+    tray.querySelectorAll(".cgm-tray-window-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        if (e.target.closest(".cgm-tray-window-close")) return;
+        const app = this._trayApps?.get(btn.dataset.tid);
+        if (!app) return;
+        if (this._isWindowMinimized(app)) this._restoreAppElement(app);
+        else this._minimizeWindow(app);
+      });
+    });
+
+    tray.querySelectorAll(".cgm-tray-window-close").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const app = this._trayApps?.get(btn.dataset.tid);
+        if (app) app.close?.();
+        setTimeout(() => this.refreshTray(), 50);
+      });
+    });
+  }
+
+  _isGameContentWindow(app) {
+    if (!app) return false;
+    if (app === this) return false;
+
+    const el = app.element?.[0] ?? app.element;
+    if (!el) return false;
+    if (!(el instanceof Element)) return false;  // V2 apps may have non-Element elements
+
+    // Must be a Foundry window
+    const isWindow = el.classList?.contains("window-app") ||
+                     el.classList?.contains("application") ||
+                     el.matches?.(".app") ||
+                     el.querySelector?.(".window-header, header");
+    if (!isWindow) return false;
+
+    // Exclude taskbars
+    if (el.id === "cypher-taskbar-bar") return false;
+    if (el.id === "cypher-gm-taskbar-bar") return false;
+    if (el.closest("#cypher-taskbar-bar")) return false;
+    if (el.closest("#cypher-gm-taskbar-bar")) return false;
+
+    // Exclude sidebar / UI panels
+    if (el.closest("#sidebar")) return false;
+    if (el.closest("#scene-controls")) return false;
+    if (el.closest("#hotbar")) return false;
+    if (el.closest("#players")) return false;
+    if (el.closest("#navigation")) return false;
+    if (el.closest("#ui-left")) return false;
+    if (el.closest("#ui-bottom")) return false;
+    if (el.closest("#notifications")) return false;
+
+    // Exclude obvious UI panels by constructor name
+    const uiTypes = ["Sidebar", "Controls", "Hotbar", "PlayerList", "Notifications", "ChatLog", "CombatTracker", "FilePicker", "Tour", "SettingsConfig", "GMTaskbar"];
+    const ctor = app.constructor?.name ?? "";
+    if (uiTypes.some(t => ctor.includes(t))) return false;
+
+    // Include sheets, journals, etc.
+    const gameTypes = ["Sheet", "Journal", "Image", "Lightbox", "Popout", "Table", "Cards", "Macro", "Scene"];
+    if (gameTypes.some(t => ctor.includes(t))) return true;
+
+    // Default: include unknown (probably game content)
+    return true;
+  }
+
+  _isWindowMinimized(app) {
+    const el = app.element?.[0] ?? app.element;
+    if (!el) return false;
+    if (el.classList?.contains("cgm-minimized")) return true;
+    if (el.style?.display === "none") return true;
+    return app._cgmMinimized === true;
+  }
+
+  _minimizeWindow(app) {
+    const el = app.element?.[0] ?? app.element;
+    if (el) {
+      app._cgmOriginalDisplay = el.style.display;
+      el.style.display = "none";
+      el.classList.add("cgm-minimized");
+    }
+    app._cgmMinimized = true;
+    this.refreshTray();
+  }
+
+  _restoreAppElement(app) {
+    const el = app.element?.[0] ?? app.element;
+    if (el) {
+      el.style.display = app._cgmOriginalDisplay ?? "";
+      el.classList.remove("cgm-minimized");
+    }
+    app._cgmMinimized = false;
+    if (typeof app.bringToTop === "function") app.bringToTop();
+    this.refreshTray();
+  }
+
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -6905,7 +9538,6 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "xpCircleOffsetX", { name: "XP Circle Offset X", hint: "Horizontal offset of XP circle (negative = left).", scope: "client", config: false, type: Number, default: 0, range: { min: -50, max: 50, step: 2 } });
   game.settings.register(MODULE_ID, "xpCircleOffsetY", { name: "XP Circle Offset Y", hint: "Vertical offset of XP circle (negative = up).", scope: "client", config: false, type: Number, default: 4, range: { min: -50, max: 50, step: 2 } });
   game.settings.register(MODULE_ID, "globalDifficulty", { name: "Global Difficulty", hint: "Default difficulty for all player rolls.", scope: "world", config: false, type: Number, default: 4, range: { min: 0, max: 15, step: 1 } });
-  game.settings.register(MODULE_ID, "actorNotes", { name: "Actor Notes", hint: "Per-actor notes stored as JSON.", scope: "client", config: false, type: String, default: "" });
   game.settings.register(MODULE_ID, "radialMenuSize", { name: "Radial Menu Size", hint: "Size of the radial menu in pixels.", scope: "client", config: false, type: Number, default: 200, range: { min: 100, max: 300, step: 10 } });
   game.settings.register(MODULE_ID, "radialMenuOffset", { name: "Radial Menu Offset", hint: "Distance from portrait to menu in pixels.", scope: "client", config: false, type: Number, default: 20, range: { min: 10, max: 100, step: 5 } });
   game.settings.register(MODULE_ID, "disableGMTaskbar", { name: "Never Load GM Taskbar", hint: "If enabled, the GM Taskbar will not appear for this user. Requires reload.", scope: "client", config: true, type: Boolean, default: false });
@@ -6924,6 +9556,11 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "section3BgColor", { name: "Section 3 Background Color", hint: "Background color of SECTION 3.", scope: "client", config: false, type: String, default: "#ffffff" });
   game.settings.register(MODULE_ID, "section3BgOpacity", { name: "Section 3 Background Opacity", hint: "Background opacity of SECTION 3 (0-100).", scope: "client", config: false, type: Number, default: 30 });
   game.settings.register(MODULE_ID, "section3Position", { name: "Section 3 Position", hint: "Horizontal offset of SECTION 3 in pixels (0-200).", scope: "client", config: false, type: Number, default: 0 });
+  // SECTION 4 (Tray) settings
+  game.settings.register(MODULE_ID, "section4Width", { name: "Section 4 Width", hint: "Width of SECTION 4 (Tray) as a percentage.", scope: "client", config: false, type: Number, default: 15 });
+  game.settings.register(MODULE_ID, "section4BgColor", { name: "Section 4 Background Color", hint: "Background color of SECTION 4 (Tray).", scope: "client", config: false, type: String, default: "#1a1020" });
+  game.settings.register(MODULE_ID, "section4BgOpacity", { name: "Section 4 Background Opacity", hint: "Background opacity of SECTION 4 (Tray) (0-100).", scope: "client", config: false, type: Number, default: 50 });
+  game.settings.register(MODULE_ID, "section4Position", { name: "Section 4 Position", hint: "Horizontal offset of SECTION 4 (Tray) in pixels (0-200).", scope: "client", config: false, type: Number, default: 0 });
   // Section unlock & button layout
   game.settings.register(MODULE_ID, "sectionsUnlocked", { name: "Unlock Sections", hint: "Allow dragging icons between sections and customizing them.", scope: "client", config: false, type: Boolean, default: false });
   game.settings.register(MODULE_ID, "buttonLayout", { name: "Button Layout", hint: "Stores button section assignments, sizes, and colors (JSON).", scope: "client", config: false, type: Object, default: {} });
@@ -6935,6 +9572,8 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "disconnectionSoundVolume", { name: "Sound Volume", hint: "Volume of the disconnection sound (0-100).", scope: "world", config: true, type: Number, default: 50, range: { min: 0, max: 100, step: 5 } });
   game.settings.register(MODULE_ID, "disconnectionSoundTarget", { name: "Sound Target", hint: "Who should hear the disconnection sound.", scope: "world", config: true, type: String, default: "gm", choices: { gm: "GM Only", all: "All Players", disconnected: "Disconnected Player Only" } });
   game.settings.register(MODULE_ID, "npcCanvasData", { name: "NPC Canvas Data", hint: "Stores NPC canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
+  game.settings.register(MODULE_ID, "enemyCanvasData", { name: "Enemy Canvas Data", hint: "Stores Enemy canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
+  game.settings.register(MODULE_ID, "itemsCanvasData", { name: "Items Canvas Data", hint: "Stores Items canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "menuPositions", { name: "Menu Positions", hint: "Saved positions for draggable radial menus (JSON).", scope: "client", config: false, type: String, default: "{}" });
 }
 
@@ -7430,6 +10069,40 @@ Hooks.on("deleteItem", (item, options, userId) => {
   window._cgmRefreshTimer = setTimeout(() => {
     window.cypherGMTaskbar._refreshPortraits();
   }, 100);
+});
+
+/* Refresh portraits when active effects are created/deleted/updated */
+Hooks.on("createActiveEffect", (effect, options, userId) => {
+  if (!game.user?.isGM) return;
+  const actor = effect.parent;
+  if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
+  if (!window.cypherGMTaskbar) return;
+  clearTimeout(window._cgmRefreshTimer);
+  window._cgmRefreshTimer = setTimeout(() => {
+    window.cypherGMTaskbar._refreshPortraits();
+  }, 50);
+});
+
+Hooks.on("deleteActiveEffect", (effect, options, userId) => {
+  if (!game.user?.isGM) return;
+  const actor = effect.parent;
+  if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
+  if (!window.cypherGMTaskbar) return;
+  clearTimeout(window._cgmRefreshTimer);
+  window._cgmRefreshTimer = setTimeout(() => {
+    window.cypherGMTaskbar._refreshPortraits();
+  }, 50);
+});
+
+Hooks.on("updateActiveEffect", (effect, data, options, userId) => {
+  if (!game.user?.isGM) return;
+  const actor = effect.parent;
+  if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
+  if (!window.cypherGMTaskbar) return;
+  clearTimeout(window._cgmRefreshTimer);
+  window._cgmRefreshTimer = setTimeout(() => {
+    window.cypherGMTaskbar._refreshPortraits();
+  }, 50);
 });
 
 /* ── Apply GM Taskbar difficulty to Cypher System roll dialogs ── */

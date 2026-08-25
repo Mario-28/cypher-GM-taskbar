@@ -906,14 +906,17 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
       </div>
     `;
 
-    const dialog = new Dialog({
-      title: `Tab Settings — ${eff.label}`,
+    const dialog = new foundry.applications.api.DialogV2({
+      window: { title: `Tab Settings — ${eff.label}` },
       content: content,
-      buttons: {
-        save: {
-          icon: "<i class='fas fa-check'></i>",
+      buttons: [
+        {
+          action: "save",
+          icon: "fas fa-check",
           label: "Save Changes",
-          callback: async (html) => {
+          default: true,
+          callback: async (event, button, dialog) => {
+            const html = $(dialog.element);
             const newSettings = {
               fontFamily: html.find("#cgm-set-font-family").val(),
               fontColor: html.find("#cgm-set-font-color").val(),
@@ -949,25 +952,25 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
             ui.notifications.info(`Tab "${newSettings.label || eff.label}" settings saved.`);
           }
         },
-        cancel: { label: "Cancel" }
-      },
-      default: "save",
-      render: (html) => {
-        const dlg = html.closest('.dialog');
+        { action: "cancel", label: "Cancel" }
+      ],
+      render: (event, html) => {
+        const $html = $(html);
+        const dlg = $html.closest('.dialog');
         if (dlg.length) dlg[0].classList.add('cgm-tab-settings-window');
 
         // Live preview updates
         const updatePreview = () => {
-          const previewTab = html.find('#cgm-ts-preview-tab');
-          const previewLabel = html.find('#cgm-ts-preview-label');
-          const label = html.find('#cgm-set-label').val().trim() || eff.label;
-          const fontFamily = html.find('#cgm-set-font-family').val();
-          const fontColor = html.find('#cgm-set-font-color').val();
-          const fontSize = html.find('#cgm-set-font-size').val();
-          const fontUppercase = html.find('#cgm-set-font-uppercase').is(':checked');
-          const fontBold = html.find('#cgm-set-font-bold').is(':checked');
-          const tabBg = html.find('#cgm-set-tab-bg').val();
-          const icon = html.find('#cgm-set-icon').val();
+          const previewTab = $html.find('#cgm-ts-preview-tab');
+          const previewLabel = $html.find('#cgm-ts-preview-label');
+          const label = $html.find('#cgm-set-label').val().trim() || eff.label;
+          const fontFamily = $html.find('#cgm-set-font-family').val();
+          const fontColor = $html.find('#cgm-set-font-color').val();
+          const fontSize = $html.find('#cgm-set-font-size').val();
+          const fontUppercase = $html.find('#cgm-set-font-uppercase').is(':checked');
+          const fontBold = $html.find('#cgm-set-font-bold').is(':checked');
+          const tabBg = $html.find('#cgm-set-tab-bg').val();
+          const icon = $html.find('#cgm-set-icon').val();
 
           if (previewLabel.length) {
             previewLabel.text(label);
@@ -986,13 +989,13 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
           if (previewIcon.length) previewIcon.attr('class', `fas ${icon || eff.icon}`);
         };
 
-        html.find('#cgm-set-label, #cgm-set-font-family, #cgm-set-font-color, #cgm-set-font-size').on('input change', updatePreview);
-        html.find('#cgm-set-font-uppercase, #cgm-set-font-bold').on('change', updatePreview);
-        html.find('#cgm-set-tab-bg').on('input', updatePreview);
+        $html.find('#cgm-set-label, #cgm-set-font-family, #cgm-set-font-color, #cgm-set-font-size').on('input change', updatePreview);
+        $html.find('#cgm-set-font-uppercase, #cgm-set-font-bold').on('change', updatePreview);
+        $html.find('#cgm-set-tab-bg').on('input', updatePreview);
 
         // Range value updates
         const bindRange = (id, valId, suffix = '') => {
-          html.find(id).on('input', (e) => { html.find(valId).text(e.currentTarget.value + suffix); });
+          $html.find(id).on('input', (e) => { $html.find(valId).text(e.currentTarget.value + suffix); });
         };
         bindRange('#cgm-set-font-size', '#cgm-set-font-size-val');
         bindRange('#cgm-set-bg-opacity', '#cgm-set-bg-opacity-val', '%');
@@ -1000,23 +1003,23 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
         bindRange('#cgm-set-canvas-opacity', '#cgm-set-canvas-opacity-val', '%');
 
         // Reset buttons
-        html.find('#cgm-clear-font-color').on('click', () => { html.find('#cgm-set-font-color').val('#c8a96e'); updatePreview(); });
-        html.find('#cgm-clear-tab-bg').on('click', () => { html.find('#cgm-set-tab-bg').val('#3a3050'); updatePreview(); });
+        html.find('#cgm-clear-font-color').on('click', () => { $html.find('#cgm-set-font-color').val('#c8a96e'); updatePreview(); });
+        html.find('#cgm-clear-tab-bg').on('click', () => { $html.find('#cgm-set-tab-bg').val('#3a3050'); updatePreview(); });
 
         // File picker
         html.find('#cgm-pick-bg-image').on('click', () => {
-          new FilePicker({ type: "image", current: html.find("#cgm-set-bg-image").val(),
-            callback: (path) => { html.find("#cgm-set-bg-image").val(path); }
+          new FilePicker({ type: "image", current: $html.find("#cgm-set-bg-image").val(),
+            callback: (path) => { $html.find("#cgm-set-bg-image").val(path); }
           }).render(true);
         });
-        html.find('#cgm-clear-bg-image').on('click', () => { html.find('#cgm-set-bg-image').val(''); });
+        html.find('#cgm-clear-bg-image').on('click', () => { $html.find('#cgm-set-bg-image').val(''); });
 
         // Icon grid
         html.find('.cgm-ts-icon-grid button').on('click', (e) => {
           const btn = e.currentTarget;
           html.find('.cgm-ts-icon-grid button').removeClass('cgm-ts-active');
           btn.classList.add('cgm-ts-active');
-          html.find('#cgm-set-icon').val(btn.dataset.icon);
+          $html.find('#cgm-set-icon').val(btn.dataset.icon);
           updatePreview();
         });
       },
@@ -1024,7 +1027,7 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
         // Overlay removed — no longer used
       }
     });
-    dialog.render(true);
+    dialog.render({ force: true });
   }
 
   /* ================================================================
@@ -1150,7 +1153,9 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
         await this._saveToFlags();
       }
       
-      this._draggingToken.classList.remove("cgm-token-dragging");
+      if (this._draggingToken) {
+        this._draggingToken.classList.remove("cgm-token-dragging");
+      }
       this._draggingToken = null;
     });
   }
@@ -1195,15 +1200,18 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
     event.preventDefault();
     this._dragOver = false;
     
-    let data;
-    try {
-      data = JSON.parse(event.dataTransfer.getData("text/plain"));
-    } catch {
-      const raw = event.dataTransfer.getData("text/plain");
-      if (!raw) return;
-      try { data = JSON.parse(raw); } catch { return; }
+    let data = null;
+    const raw = event.dataTransfer.getData("text/plain");
+    if (raw) {
+      try { data = JSON.parse(raw); } catch (e) {
+        console.log("[NPCCanvas] Drop raw data (not JSON):", raw);
+      }
     }
-    if (!data) return;
+    if (!data) {
+      console.log("[NPCCanvas] No drop data found");
+      return;
+    }
+    console.log("[NPCCanvas] Drop data:", data);
 
     const viewportRect = viewport.getBoundingClientRect();
     const dropX = event.clientX - viewportRect.left;
@@ -1214,19 +1222,31 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
     if (data.type === "Actor") {
       let actor = null;
       if (data.uuid) {
-        try { actor = await fromUuid(data.uuid); } catch {}
+        try { actor = await fromUuid(data.uuid); } catch (e) {
+          console.log("[NPCCanvas] fromUuid failed:", e);
+        }
       } else if (data.id) {
         actor = game.actors?.get(data.id);
       }
-      if (actor && (actor.type === "npc" || actor.type === "NPC")) {
+      if (actor) {
+        console.log("[NPCCanvas] Actor dropped:", actor.name, "type:", actor.type);
         await this._addNPC(actor, worldX, worldY);
+      } else {
+        ui.notifications.warn("Could not resolve dropped actor.");
       }
       return;
     }
     
     if (data.type === "Token") {
-      const token = canvas.tokens?.get(data.uuid || data.id);
-      if (token?.actor && (token.actor.type === "npc" || token.actor.type === "NPC")) {
+      let token = null;
+      if (data.uuid) {
+        try { token = await fromUuid(data.uuid); } catch {}
+      }
+      if (!token && data.id) {
+        token = canvas.tokens?.get(data.id);
+      }
+      if (token?.actor) {
+        console.log("[NPCCanvas] Token actor dropped:", token.actor.name);
         await this._addNPC(token.actor, worldX, worldY);
       }
       return;
@@ -1473,8 +1493,8 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
   }
 
   async _onAddTab() {
-    const dialog = new Dialog({
-      title: "Add Tab",
+    const dialog = new foundry.applications.api.DialogV2({
+      window: { title: "Add Tab" },
       content: `
         <div class="cgm-dialog-form">
           <div class="cgm-form-row"><label>Tab Name:</label><input type="text" id="cgm-new-tab-name" placeholder="My NPCs"></div>
@@ -1484,8 +1504,9 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
             <option value="fa-fire">Fire</option><option value="fa-moon">Moon</option>
           </select></div>
         </div>`,
-      buttons: {
-        create: { icon: "<i class='fas fa-check'></i>", label: "Create", callback: async (html) => {
+      buttons: [
+        { action: "create", icon: "fas fa-check", label: "Create", default: true, callback: async (event, button, dialog) => {
+          const html = $(dialog.element);
           const name = html.find("#cgm-new-tab-name").val().trim();
           const icon = html.find("#cgm-new-tab-icon").val();
           if (!name) return;
@@ -1496,11 +1517,10 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
           await this._saveToFlags();
           this.render();
         }},
-        cancel: { label: "Cancel" }
-      },
-      default: "create"
+        { action: "cancel", label: "Cancel" }
+      ]
     });
-    dialog.render(true);
+    dialog.render({ force: true });
   }
 
   _getTabLabel(tabId) { return this._tabs.find(t => t.id === tabId)?.label || tabId; }
