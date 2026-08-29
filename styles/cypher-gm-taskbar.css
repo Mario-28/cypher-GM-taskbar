@@ -578,7 +578,6 @@
   z-index: 999999;
   display: flex;
   flex-direction: column;
-  align-items: center;
   gap: 10px;
   padding: 14px 16px;
   background: linear-gradient(160deg, #1a1525, #0f0b18);
@@ -592,7 +591,8 @@
   transform: translateY(8px) scale(0.9);
   transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   pointer-events: none;
-  min-width: 160px;
+  width: 256px;
+  max-width: 256px;
 }
 .cgm-token-tooltip-fancy::after {
   content: '';
@@ -605,25 +605,142 @@
   border-right: 8px solid transparent;
   border-top: 8px solid rgba(200, 169, 110, 0.25);
 }
-.cgm-token-tooltip-fancy img {
-  width: 154px;
-  height: 154px;
-  object-fit: contain;
+
+/* Tooltip header: image + info side by side */
+.cgm-tt-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+.cgm-tt-header img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
   object-position: top center;
   border-radius: 50%;
-  border: 3px solid rgba(200, 169, 110, 0.3);
-  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  border: 2px solid rgba(200, 169, 110, 0.3);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  flex-shrink: 0;
 }
-.cgm-token-tooltip-fancy span {
+.cgm-tt-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.cgm-tt-name {
   font-size: 14px;
   font-weight: 700;
   color: var(--cgm-accent, #c8a96e);
-  text-align: center;
-  max-width: 180px;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.5);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+  max-width: 160px;
+}
+.cgm-tt-label {
+  font-size: 9px;
+  font-weight: 600;
+  color: rgba(200, 169, 110, 0.5);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.cgm-tt-level {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.cgm-tt-level .cgm-tt-value {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+/* Tooltip meta row */
+.cgm-tt-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cgm-tt-type {
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(200, 169, 110, 0.7);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  background: rgba(200, 169, 110, 0.1);
+  border-radius: 4px;
+}
+.cgm-tt-level {
+  font-size: 10px;
+  font-weight: 700;
+  color: #fbbf24;
+}
+.cgm-tt-damage {
+  font-size: 10px;
+  font-weight: 700;
+  color: #f87171;
+}
+
+/* Pool grid */
+.cgm-tt-pools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.cgm-tt-pool {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e8e0d0;
+}
+.cgm-tt-pool i {
+  font-size: 10px;
+  width: 14px;
+  text-align: center;
+}
+.cgm-tt-pool-might i { color: #f87171; }
+.cgm-tt-pool-speed i { color: #60a5fa; }
+.cgm-tt-pool-intellect i { color: #a78bfa; }
+.cgm-tt-pool small {
+  font-size: 9px;
+  color: rgba(200, 169, 110, 0.5);
+  margin-left: 2px;
+}
+
+/* HP bar */
+.cgm-tt-hp {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.cgm-tt-hp-bar {
+  width: 100%;
+  height: 8px;
+  background: rgba(0,0,0,0.4);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+.cgm-tt-hp-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.cgm-tt-hp-text {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(232, 232, 232, 0.7);
+  text-align: right;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1777,6 +1894,19 @@
   flex-shrink: 0;
   user-select: none;
   margin-right: 8px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--cgm-radius);
+  transition: background 0.15s, color 0.15s, transform 0.1s;
+}
+.cgm-brand:hover {
+  background: rgba(200,169,110,0.12);
+  color: #fff;
+}
+.cgm-brand:active {
+  transform: scale(0.95);
 }
 
 /* ── Buttons (left side) ── */
@@ -7338,6 +7468,7 @@
   cursor: pointer;
   transition: all 0.15s ease;
   flex-shrink: 0;
+  position: relative;
 }
 
 .cgm-cash-valuable-item:hover {
@@ -7350,6 +7481,31 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.cgm-cash-valuable-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(217, 64, 64, 0.85);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 2;
+  padding: 0;
+}
+
+.cgm-cash-valuable-item:hover .cgm-cash-valuable-remove {
+  opacity: 1;
 }
 
 .cgm-cash-valuables-empty {
@@ -7403,6 +7559,7 @@
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.15s ease;
+  position: relative;
 }
 
 .cgm-assets-card:hover {
@@ -7425,6 +7582,31 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cgm-assets-remove {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(217, 64, 64, 0.85);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 2;
+  padding: 0;
+}
+
+.cgm-assets-card:hover .cgm-assets-remove {
+  opacity: 1;
 }
 
 .cgm-assets-empty {
@@ -8937,4 +9119,514 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ============================================================
+   CYPHER XP INTEGRATION
+   ============================================================ */
+
+/* Hide floating Cypher XP launcher — GM opens it from taskbar */
+body #cypher-xp-player-launcher,
+body #cypher-development-track-player-launcher {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden !important;
+}
+
+/* Cypher XP button on GM taskbar */
+.cgm-xp-btn {
+  position: relative;
+  margin-left: 4px;
+}
+.cgm-xp-btn i {
+  filter: drop-shadow(0 0 2px rgba(255, 215, 0, 0.4));
+  transition: filter 0.2s ease;
+}
+.cgm-xp-btn:hover i {
+  filter: drop-shadow(0 0 6px rgba(255, 215, 0, 0.8));
+}
+
+/* Flash animation for incoming player XP requests */
+@keyframes cgm-xp-flash {
+  0%, 100% { background: rgba(255, 215, 0, 0); box-shadow: none; }
+  25% { background: rgba(255, 215, 0, 0.35); box-shadow: 0 0 12px rgba(255, 215, 0, 0.6); }
+  50% { background: rgba(255, 215, 0, 0.15); box-shadow: 0 0 6px rgba(255, 215, 0, 0.3); }
+  75% { background: rgba(255, 215, 0, 0.35); box-shadow: 0 0 12px rgba(255, 215, 0, 0.6); }
+}
+.cgm-xp-flash {
+  animation: cgm-xp-flash 1s ease-in-out 3;
+  border-radius: 4px;
+}
+
+/* Persistent yellow flash — pending requests */
+@keyframes cgm-xp-flash-pending {
+  0%, 100% { background: rgba(251, 191, 36, 0); box-shadow: none; }
+  50% { background: rgba(251, 191, 36, 0.35); box-shadow: 0 0 12px rgba(251, 191, 36, 0.6); }
+}
+.cgm-xp-flash-pending {
+  animation: cgm-xp-flash-pending 1.2s ease-in-out infinite;
+  border-radius: 4px;
+}
+.cgm-xp-flash-pending i {
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.8)) !important;
+}
+
+/* Persistent blue flash — tier ready */
+@keyframes cgm-xp-flash-tier {
+  0%, 100% { background: rgba(96, 165, 250, 0); box-shadow: none; }
+  50% { background: rgba(96, 165, 250, 0.35); box-shadow: 0 0 12px rgba(96, 165, 250, 0.6); }
+}
+.cgm-xp-flash-tier {
+  animation: cgm-xp-flash-tier 1.2s ease-in-out infinite;
+  border-radius: 4px;
+}
+.cgm-xp-flash-tier i {
+  filter: drop-shadow(0 0 4px rgba(96, 165, 250, 0.8)) !important;
+}
+
+/* Position Cypher XP app above taskbar */
+#cypher-xp-player-app {
+  position: fixed !important;
+}
+
+
+/* Cypher XP button hidden state */
+.cgm-xp-hidden {
+  display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CYPHER XP GM DASHBOARD HEADER ICONS
+   ═══════════════════════════════════════════════════════════════ */
+.cgm-xp-dashboard-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+.cgm-xp-header-icon {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  font-size: 12px;
+  color: #c8a96e;
+  user-select: none;
+}
+
+.cgm-xp-header-icon:hover {
+  background: rgba(200, 169, 110, 0.15);
+  border-color: rgba(200, 169, 110, 0.4);
+}
+
+.cgm-xp-header-icon i {
+  font-size: 13px;
+}
+
+.cgm-xp-header-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cgm-xp-header-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: rgba(100, 100, 100, 0.4);
+  color: #aaa;
+  font-size: 10px;
+  font-weight: 700;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+.cgm-xp-header-badge.cgm-xp-badge-active {
+  background: #d94040;
+  color: #fff;
+  box-shadow: 0 0 6px rgba(217, 64, 64, 0.5);
+}
+
+.cgm-xp-header-award i {
+  color: #4ade80;
+}
+
+.cgm-xp-header-pending i {
+  color: #fbbf24;
+}
+
+.cgm-xp-header-tier i {
+  color: #60a5fa;
+}
+
+.cgm-xp-header-adjust i {
+  color: #f472b6;
+}
+
+.cgm-xp-header-undo i {
+  color: #a78bfa;
+}
+
+.cgm-xp-header-redo i {
+  color: #a78bfa;
+}
+
+.cgm-xp-header-icon.cgm-xp-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.cgm-xp-header-divider {
+  width: 1px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.15);
+  margin: 0 4px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CYPHER XP REQUESTS LIST — ACTOR ICONS
+   ═══════════════════════════════════════════════════════════════ */
+.cgm-xp-request-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 8px;
+}
+
+.cgm-xp-request-actor img {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid rgba(200, 169, 110, 0.4);
+}
+
+.cgm-xp-request-actor span {
+  font-size: 12px;
+  font-weight: 600;
+  color: #c8a96e;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CYPHER XP HISTORY TAB
+   ═══════════════════════════════════════════════════════════════ */
+.cgm-xp-history-panel {
+  padding: 12px;
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.cgm-xp-history-empty {
+  text-align: center;
+  color: #888;
+  font-style: italic;
+  padding: 40px 20px;
+  font-size: 14px;
+}
+
+.cgm-xp-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cgm-xp-history-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background 0.2s ease;
+}
+
+.cgm-xp-history-item:hover {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.cgm-xp-history-item.cgm-xp-history-undone {
+  opacity: 0.45;
+}
+
+.cgm-xp-history-item.cgm-xp-history-current {
+  border-color: rgba(200, 169, 110, 0.5);
+  background: rgba(200, 169, 110, 0.08);
+}
+
+.cgm-xp-history-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid rgba(200, 169, 110, 0.3);
+  flex-shrink: 0;
+}
+
+.cgm-xp-history-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.cgm-xp-history-time {
+  font-size: 10px;
+  color: #888;
+  margin-bottom: 2px;
+  font-family: monospace;
+}
+
+.cgm-xp-history-text {
+  font-size: 13px;
+  color: #ddd;
+  line-height: 1.4;
+}
+
+.cgm-xp-history-text strong {
+  color: #c8a96e;
+  font-weight: 600;
+}
+
+.cgm-xp-history-text i {
+  color: #c8a96e;
+  margin-right: 6px;
+  font-size: 12px;
+}
+
+.cgm-xp-history-marker {
+  color: #4ade80;
+  font-size: 14px;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+/* ── GM Menu (Windows-style) ── */
+.cgm-gm-winmenu {
+  position: fixed;
+  z-index: 110;
+  background: rgba(20, 22, 35, 0.96);
+  border: 1px solid rgba(200, 169, 110, 0.25);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  transform: scale(0.92) translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  pointer-events: auto;
+  font-family: var(--cgm-font);
+}
+.cgm-gm-winmenu.cgm-gm-winmenu-visible {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+}
+
+.cgm-gm-winmenu-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(15, 17, 30, 0.7);
+  border-bottom: 1px solid rgba(200, 169, 110, 0.15);
+  cursor: grab;
+  user-select: none;
+  font-family: "Bebas Neue", sans-serif;
+  font-size: 16px;
+  color: var(--cgm-accent);
+  letter-spacing: 1px;
+}
+.cgm-gm-winmenu-header:active {
+  cursor: grabbing;
+}
+.cgm-gm-winmenu-header i {
+  font-size: 14px;
+}
+
+.cgm-gm-winmenu-body {
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  align-content: start;
+}
+
+/* Sections */
+.cgm-gm-menu-section {
+  border: 1px solid rgba(200, 169, 110, 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(15, 17, 30, 0.4);
+}
+.cgm-gm-menu-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--sec-color, var(--cgm-accent));
+  border-bottom: 1px solid rgba(200, 169, 110, 0.08);
+  background: rgba(200, 169, 110, 0.04);
+}
+.cgm-gm-menu-section-header i {
+  font-size: 10px;
+}
+
+/* Drop zone / list */
+.cgm-gm-menu-list {
+  min-height: 48px;
+  padding: 4px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cgm-gm-menu-list-dragover {
+  background: rgba(200, 169, 110, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(200, 169, 110, 0.25);
+}
+.cgm-gm-menu-empty {
+  text-align: center;
+  padding: 14px 8px;
+  font-size: 11px;
+  color: rgba(200, 169, 110, 0.35);
+  font-style: italic;
+}
+
+/* Items */
+.cgm-gm-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s;
+  font-size: 12px;
+  color: #e8e0d0;
+}
+.cgm-gm-menu-item:hover {
+  background: rgba(200, 169, 110, 0.12);
+}
+.cgm-gm-menu-item img {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.cgm-gm-menu-item span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cgm-gm-menu-item-remove {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  background: none;
+  border: none;
+  color: rgba(200, 169, 110, 0.4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.cgm-gm-menu-item:hover .cgm-gm-menu-item-remove {
+  opacity: 1;
+}
+.cgm-gm-menu-item-remove:hover {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+}
+.cgm-gm-menu-item-dragging {
+  opacity: 0.4;
+}
+
+/* Vertical buttons */
+@keyframes cgm-vbtn-in {
+  to { opacity: 1; transform: translateX(0); }
+}
+.cgm-gm-winmenu-vbtns {
+  position: absolute;
+  right: -42px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cgm-gm-winmenu-vbtn {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: rgba(20, 22, 35, 0.92);
+  border: 1px solid rgba(200, 169, 110, 0.25);
+  color: var(--vbtn-color, #c8a96e);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateX(-8px);
+  animation: cgm-vbtn-in 0.25s ease forwards;
+  animation-delay: var(--vbtn-delay, 0ms);
+  transition: background 0.15s, border-color 0.15s, transform 0.1s, box-shadow 0.15s;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.cgm-gm-winmenu-vbtn:hover {
+  background: rgba(30, 33, 52, 0.98);
+  border-color: var(--vbtn-color, #c8a96e);
+  transform: translateX(0) scale(1.08);
+  box-shadow: 0 0 12px var(--vbtn-color, rgba(200, 169, 110, 0.3));
+}
+.cgm-gm-winmenu-vbtn:active {
+  transform: translateX(0) scale(0.95);
+}
+
+/* Fancy tooltip */
+.cgm-gm-winmenu-vbtn::after {
+  content: attr(title);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) scale(0.9);
+  background: rgba(15, 17, 30, 0.96);
+  border: 1px solid rgba(200, 169, 110, 0.3);
+  border-left: 3px solid var(--vbtn-color, #c8a96e);
+  color: #e8e0d0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-family: var(--cgm-font);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s, transform 0.15s;
+  z-index: 120;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+}
+.cgm-gm-winmenu-vbtn:hover::after {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
 }

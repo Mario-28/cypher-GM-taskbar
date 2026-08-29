@@ -1,5 +1,5 @@
 /**
- * Cypher GM Taskbar v4.5.26
+ * Cypher GM Taskbar v4.5.104
  * Foundry VTT v13+ | Cypher System
  *
  * GM-only taskbar with combat tracker, intrusions, cyphers, recovery,
@@ -103,6 +103,16 @@ class GMTaskbar {
     this._reputationPanelEl = null;
     this._reputationPanelPos = null;
     this._groupStatuses = new GroupStatusesMenu(this);
+    // Cypher XP integration
+    this._xpApi = null;
+    this._xpFlashTimer = null;
+    this._xpCountInterval = null;
+    this._openingXpDashboard = false;
+    this._xpActionHistory = [];     // Award / Approve / Reject actions for undo
+    this._xpHistoryIndex = -1;       // Current position in history
+    this._xpMaxHistory = 20;         // Max history entries
+    this._xpHistoryHookIds = [];     // Track registered hook IDs for cleanup
+    this._registerXpHistoryHooks();  // Auto-log cypher-xp GM actions
     // Tray (Section 4) — minimized window tracking
     this._trayApps = new Map();
     this._trayInterval = null;
@@ -111,6 +121,968 @@ class GMTaskbar {
     this._dynamicButtons = []; // Discovered injected buttons from other modules
     this._loadSettings();
     this._loadPanelPositions();
+  }
+
+  /** Register cypher-xp hooks to auto-log GM actions for History + Undo */
+  _registerXpHistoryHooks() {
+    const hooks = [
+      // GM awards XP
+      { event: "cypher-xp.xpAwarded", handler: ({ actor, transaction }) => {
+        if (transaction?.type !== "gm-award") return;
+        this._pushXpHistory({
+          type: "awardXP",
+          actorId: actor.id,
+          actorName: actor.name,
+          actorImg: actor.img,
+          amount: transaction.xpDelta || 0,
+          reason: transaction.label || "GM Award",
+          timestamp: transaction.timestamp || Date.now(),
+          undone: false
+        });
+        this._refreshHistoryView();
+      }},
+      // Request created (player submits)
+      { event: "cypher-xp.requestCreated", handler: ({ actor, request }) => {
+        this._pushXpHistory({
+          type: "requestCreated",
+          actorId: actor.id,
+          actorName: actor.name,
+          actorImg: actor.img,
+          requestId: request.id,
+          category: request.category,
+          requestedCost: request.requestedCost,
+          label: request.label,
+          timestamp: request.timestamp || Date.now(),
+          undone: false
+        });
+        this._refreshHistoryView();
+      }},
+      // Request updated (approved / rejected / cancelled)
+      { event: "cypher-xp.requestUpdated", handler: ({ actor, request }) => {
+        const actionType = request.status === "approved" ? "requestApproved" : request.status === "rejected" ? "requestRejected" : "requestUpdated";
+        this._pushXpHistory({
+          type: actionType,
+          actorId: actor.id,
+          actorName: actor.name,
+          actorImg: actor.img,
+          requestId: request.id,
+          category: request.category,
+          requestedCost: request.requestedCost,
+          label: request.label,
+          status: request.status,
+          timestamp: Date.now(),
+          undone: false
+        });
+        this._refreshHistoryView();
+      }},
+      // Tier breakthrough
+      { event: "cypher-xp.tierBreakthrough", handler: ({ actor, fromTier, toTier }) => {
+        this._pushXpHistory({
+          type: "tierBreakthrough",
+          actorId: actor.id,
+          actorName: actor.name,
+          actorImg: actor.img,
+          fromTier,
+          toTier,
+          timestamp: Date.now(),
+          undone: false
+        });
+        this._refreshHistoryView();
+      }},
+      // Purchase applied (immediate spend)
+      { event: "cypher-xp.purchaseApplied", handler: ({ actor, request, transaction }) => {
+        this._pushXpHistory({
+          type: "purchaseApplied",
+          actorId: actor.id,
+          actorName: actor.name,
+          actorImg: actor.img,
+          label: request?.label || transaction?.label || "Purchase",
+          cost: request?.requestedCost || transaction?.xpDelta || 0,
+          timestamp: Date.now(),
+          undone: false
+        });
+        this._refreshHistoryView();
+      }},
+    ];
+
+    for (const h of hooks) {
+      const id = Hooks.on(h.event, h.handler);
+      this._xpHistoryHookIds.push({ event: h.event, id });
+    }
+  }
+
+  /** Clean up cypher-xp hooks (called on close/destroy if needed) */
+  _unregisterXpHistoryHooks() {
+    for (const h of this._xpHistoryHookIds) {
+      Hooks.off(h.event, h.id);
+    }
+    this._xpHistoryHookIds = [];
+  }
+
+  /** Refresh the History tab view if it's currently visible */
+  _refreshHistoryView() {
+    const appEl = document.getElementById("cypher-xp-gm-dashboard");
+    if (!appEl) return;
+    const historyPanel = appEl.querySelector(".cgm-xp-history-panel");
+    if (historyPanel && historyPanel.style.display !== "none") {
+      this._renderXpHistoryPanel(historyPanel);
+    }
+    // Also update header undo/redo states if header exists
+    const header = appEl.querySelector(".cgm-xp-dashboard-header");
+    if (header) this._updateUndoRedoState(header);
+  }
+
+  /* ─── Cypher XP Integration ─── */
+  _cypherXpActive() {
+    return game.modules.get("cypher-xp")?.active === true;
+  }
+
+  _getXpApi() {
+    if (this._xpApi?.openGmDashboard) return this._xpApi;
+    const mod = game.modules.get("cypher-xp");
+    if (mod?.active && mod.api?.openGmDashboard) {
+      this._xpApi = mod.api;
+      return mod.api;
+    }
+    return null;
+  }
+
+  /** Open Cypher XP GM Dashboard */
+  async _openCypherXpApp(btnEl) {
+    // Guard: prevent double-clicks / multiple listeners from opening multiple windows
+    if (this._openingXpDashboard) return;
+    this._openingXpDashboard = true;
+
+    try {
+      if (!this._cypherXpActive()) {
+        return ui.notifications.warn("Cypher XP module is not active.");
+      }
+
+      let api = this._getXpApi();
+      for (let i = 0; i < 50 && !api; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        api = this._getXpApi();
+      }
+      if (!api) {
+        return ui.notifications.warn("Cypher XP API is not ready yet.");
+      }
+
+      const GM_APP_ID = "cypher-xp-gm-dashboard";
+      let appEl = null;
+
+      // Use MutationObserver to catch the element the instant it enters the DOM
+      // — before the browser paints a single frame in the default position.
+      const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            if (node.id === GM_APP_ID) {
+              appEl = node;
+            } else if (node.querySelector) {
+              const found = node.querySelector(`#${GM_APP_ID}`);
+              if (found) appEl = found;
+            }
+            if (appEl) {
+              observer.disconnect();
+              // Hide completely (no layout, no paint) until positioned
+              appEl.style.visibility = "hidden";
+              appEl.style.transition = "none";
+              return;
+            }
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      // Open the dashboard
+      await api.openGmDashboard();
+
+      // Wait for observer to catch it (up to 2 seconds)
+      let waitAttempts = 0;
+      while (!appEl && waitAttempts < 40) {
+        await new Promise(r => setTimeout(r, 50));
+        waitAttempts++;
+      }
+      observer.disconnect();
+
+      // Fallback: find it the normal way if observer missed it
+      if (!appEl) {
+        appEl = document.getElementById(GM_APP_ID);
+      }
+      if (!appEl) {
+        return ui.notifications.warn("Cypher XP GM Dashboard did not open.");
+      }
+
+      // Position and inject header icons
+      this._positionXpDashboard(appEl, btnEl);
+      this._injectXpDashboardHeader(appEl);
+
+      // Now make it visible — browser will paint it already in the right spot
+      requestAnimationFrame(() => {
+        appEl.style.visibility = "visible";
+        appEl.style.transition = "opacity 0.15s ease";
+        appEl.style.opacity = "1";
+      });
+    } finally {
+      this._openingXpDashboard = false;
+    }
+  }
+
+  /** Position Cypher XP GM Dashboard above the taskbar button AND lock it in place */
+  _positionXpDashboard(appEl, btnEl) {
+    if (!appEl || !btnEl) return;
+    const btnRect = btnEl.getBoundingClientRect();
+    const appWidth = appEl.offsetWidth || 920;
+    const appHeight = appEl.offsetHeight || 720;
+
+    // Bottom-left corner just above the button (4px gap)
+    let top = btnRect.top - appHeight - 4;
+    let left = btnRect.left;
+
+    // Keep on screen: if too high, place below button instead
+    if (top < 0) top = btnRect.bottom + 8;
+    // Keep right edge on screen
+    if (left + appWidth > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - appWidth - 8);
+    }
+
+    // Find the actual Foundry ApplicationV2 instance and lock its position
+    // so internal click/drag handlers can't move the window.
+    const appId = appEl.id || "cypher-xp-gm-dashboard";
+    let appInstance = null;
+    if (ui.windows) {
+      appInstance = Object.values(ui.windows).find(a => a.id === appId || a.element?.[0] === appEl || a.element === appEl);
+    }
+    if (!appInstance && appEl.dataset?.appid) {
+      appInstance = ui.windows?.[appEl.dataset.appid];
+    }
+
+    if (appInstance) {
+      // Lock: override setPosition so Foundry can't move the window
+      if (!appInstance._cgmOriginalSetPosition) {
+        appInstance._cgmOriginalSetPosition = appInstance.setPosition;
+      }
+      appInstance.setPosition = () => appInstance; // no-op, returns self
+      // Update internal position object so Foundry thinks it's already there
+      appInstance.position.left = left;
+      appInstance.position.top = top;
+      if (appInstance._updatePosition) {
+        appInstance._updatePosition = () => {};
+      }
+    }
+
+    // Apply CSS positioning as well
+    appEl.style.position = "fixed";
+    appEl.style.top = `${top}px`;
+    appEl.style.left = `${left}px`;
+    appEl.style.zIndex = "10000";
+    appEl.style.transform = "none";
+
+    // Intercept any future position changes via MutationObserver
+    if (!appEl._cgmPositionLock) {
+      appEl._cgmPositionLock = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          if (m.type === "attributes" && (m.attributeName === "style" || m.attributeName === "class")) {
+            const el = m.target;
+            // If Foundry changed our position, force it back
+            const currentTop = parseFloat(el.style.top);
+            const currentLeft = parseFloat(el.style.left);
+            if (Math.abs(currentTop - top) > 2 || Math.abs(currentLeft - left) > 2) {
+              el.style.top = `${top}px`;
+              el.style.left = `${left}px`;
+              el.style.position = "fixed";
+              el.style.transform = "none";
+            }
+          }
+        }
+      });
+      appEl._cgmPositionLock.observe(appEl, { attributes: true, attributeFilter: ["style", "class"] });
+    }
+  }
+
+  /** Inject header icons into Cypher XP GM Dashboard */
+  _injectXpDashboardHeader(appEl) {
+    if (!appEl) return;
+    if (appEl.querySelector(".cgm-xp-dashboard-header")) return;
+
+    // Try multiple header selectors (ApplicationV2 vs legacy)
+    const header = appEl.querySelector("header.window-header")
+      || appEl.querySelector(".window-header")
+      || appEl.querySelector("[class*='header']")
+      || appEl.firstElementChild;
+    if (!header) {
+      console.warn(`${MODULE_ID} | Could not find dashboard header to inject icons`);
+      return;
+    }
+
+    const pending = this._getXpPendingCount();
+    const tierReady = this._getXpTierReadyCount();
+
+    const headerHtml = document.createElement("div");
+    headerHtml.className = "cgm-xp-dashboard-header";
+    headerHtml.innerHTML = `
+      <div class="cgm-xp-header-icon cgm-xp-header-undo ${this._xpHistoryIndex >= 0 ? '' : 'cgm-xp-disabled'}" title="Undo last action" data-action="undo">
+        <i class="fas fa-rotate-left"></i>
+        <span class="cgm-xp-header-label">Undo</span>
+      </div>
+      <div class="cgm-xp-header-icon cgm-xp-header-redo ${this._xpHistoryIndex < this._xpActionHistory.length - 1 ? '' : 'cgm-xp-disabled'}" title="Redo action" data-action="redo">
+        <i class="fas fa-rotate-right"></i>
+        <span class="cgm-xp-header-label">Redo</span>
+      </div>
+      <div class="cgm-xp-header-divider"></div>
+      <div class="cgm-xp-header-icon cgm-xp-header-award" title="Award XP" data-action="awardXp">
+        <i class="fas fa-gift"></i>
+        <span class="cgm-xp-header-label">Award XP</span>
+      </div>
+      <div class="cgm-xp-header-icon cgm-xp-header-adjust" title="Adjust XP (+/-)" data-action="adjustXp">
+        <i class="fas fa-sliders"></i>
+        <span class="cgm-xp-header-label">Adjust</span>
+      </div>
+      <div class="cgm-xp-header-icon cgm-xp-header-pending" title="Pending requests" data-action="pendingRequests">
+        <i class="fas fa-bell"></i>
+        <span class="cgm-xp-header-label">Pending</span>
+        <span class="cgm-xp-header-badge ${pending > 0 ? 'cgm-xp-badge-active' : ''}">${pending}</span>
+      </div>
+      <div class="cgm-xp-header-icon cgm-xp-header-tier" title="Tier ready" data-action="tierReady">
+        <i class="fas fa-arrow-up"></i>
+        <span class="cgm-xp-header-label">Tier Ready</span>
+        <span class="cgm-xp-header-badge ${tierReady > 0 ? 'cgm-xp-badge-active' : ''}">${tierReady}</span>
+      </div>
+    `;
+
+    // Try to insert after window title, or append to header
+    const titleEl = header.querySelector(".window-title") || header.querySelector("h1") || header.querySelector("h2");
+    if (titleEl && titleEl.nextSibling) {
+      header.insertBefore(headerHtml, titleEl.nextSibling);
+    } else {
+      header.appendChild(headerHtml);
+    }
+
+    // Bind click handlers — use inline logic instead of cross-module imports
+    headerHtml.querySelector("[data-action='undo']")?.addEventListener("click", async () => {
+      await this._undoLastAction();
+      this._updateUndoRedoState(headerHtml);
+    });
+    headerHtml.querySelector("[data-action='redo']")?.addEventListener("click", async () => {
+      await this._redoLastAction();
+      this._updateUndoRedoState(headerHtml);
+    });
+    headerHtml.querySelector("[data-action='awardXp']")?.addEventListener("click", async () => {
+      await this._awardXpFlow();
+      this._updateUndoRedoState(headerHtml);
+    });
+    headerHtml.querySelector("[data-action='adjustXp']")?.addEventListener("click", async () => {
+      await this._adjustXpFlow();
+    });
+    headerHtml.querySelector("[data-action='pendingRequests']")?.addEventListener("click", async () => {
+      try {
+        const api = this._getXpApi();
+        if (api?.openGmDashboard) api.openGmDashboard({ tab: "requests" });
+        else ui.notifications.info("Pending requests clicked");
+      } catch (e) {
+        console.warn(`${MODULE_ID} | Could not open pending requests:`, e);
+      }
+    });
+    headerHtml.querySelector("[data-action='tierReady']")?.addEventListener("click", async () => {
+      try {
+        const api = this._getXpApi();
+        if (api?.openGmDashboard) api.openGmDashboard({ tab: "party" });
+        else ui.notifications.info("Tier ready clicked");
+      } catch (e) {
+        console.warn(`${MODULE_ID} | Could not open tier ready:`, e);
+      }
+    });
+
+    // Start periodic count updates
+    this._startXpDashboardCountUpdates(appEl);
+
+    // Inject actor icons into requests list and watch for re-renders
+    this._injectXpRequestActorIcons(appEl);
+    this._watchXpRequestsTab(appEl);
+
+    // Inject History tab into the dashboard
+    this._injectXpHistoryTab(appEl);
+  }
+
+  /** Get pending XP requests count using cypher-xp DevelopmentService */
+  _getXpPendingCount() {
+    try {
+      const mod = game.modules.get("cypher-xp");
+      if (!mod?.active) return 0;
+      // Try to access DevelopmentService if already loaded
+      const ds = mod.api?._developmentService || window.cypherXpDevelopmentService;
+      if (ds?.getData) {
+        return game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).reduce((sum, actor) => {
+          const data = ds.getData(actor);
+          return sum + (data.requests?.filter(r => r.status === "pending").length ?? 0);
+        }, 0);
+      }
+    } catch (e) { /* fall through */ }
+    // Fallback: read from actor flags directly (cypher-xp stores data at flag key "data")
+    try {
+      return game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).reduce((sum, actor) => {
+        const data = actor.getFlag("cypher-xp", "data") || {};
+        return sum + (data.requests?.filter(r => r.status === "pending").length ?? 0);
+      }, 0);
+    } catch { return 0; }
+    return 0;
+  }
+
+  /** Get tier-ready count using cypher-xp DevelopmentService */
+  _getXpTierReadyCount() {
+    try {
+      const mod = game.modules.get("cypher-xp");
+      if (!mod?.active) return 0;
+      const ds = mod.api?._developmentService || window.cypherXpDevelopmentService;
+      if (ds?.getData && ds?.isTierReady) {
+        return game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).reduce((sum, actor) => {
+          const data = ds.getData(actor);
+          const tier = Number(actor.system?.basic?.tier ?? 1);
+          return sum + (ds.isTierReady(data, tier) ? 1 : 0);
+        }, 0);
+      }
+    } catch (e) { /* fall through */ }
+    // Fallback: basic tier readiness check (cypher-xp uses progress.lifetime)
+    try {
+      return game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).reduce((sum, actor) => {
+        const data = actor.getFlag("cypher-xp", "data") || {};
+        const tier = Number(actor.system?.basic?.tier ?? 1);
+        const thresholds = { 1: 4, 2: 8, 3: 12, 4: 16, 5: 20 };
+        const nextThreshold = thresholds[tier] ?? 999;
+        const lifetime = data.progress?.lifetime ?? 0;
+        return sum + (lifetime >= nextThreshold ? 1 : 0);
+      }, 0);
+    } catch { return 0; }
+    return 0;
+  }
+
+  /** Start periodic updates for dashboard header counts */
+  _startXpDashboardCountUpdates(appEl) {
+    if (this._xpCountInterval) clearInterval(this._xpCountInterval);
+    this._xpCountInterval = setInterval(() => {
+      if (!document.body.contains(appEl)) {
+        clearInterval(this._xpCountInterval);
+        this._xpCountInterval = null;
+        // Clean up position lock observer too
+        appEl._cgmPositionLock?.disconnect();
+        appEl._cgmRequestObserver?.disconnect();
+        return;
+      }
+      const pending = this._getXpPendingCount();
+      const tierReady = this._getXpTierReadyCount();
+
+      const pendingBadge = appEl.querySelector(".cgm-xp-header-pending .cgm-xp-header-badge");
+      if (pendingBadge) {
+        pendingBadge.textContent = pending;
+        pendingBadge.classList.toggle("cgm-xp-badge-active", pending > 0);
+      }
+
+      const tierBadge = appEl.querySelector(".cgm-xp-header-tier .cgm-xp-header-badge");
+      if (tierBadge) {
+        tierBadge.textContent = tierReady;
+        tierBadge.classList.toggle("cgm-xp-badge-active", tierReady > 0);
+      }
+    }, 3000);
+  }
+
+  /** Inject actor portrait icons into the GM Dashboard requests list */
+  _injectXpRequestActorIcons(appEl) {
+    if (!appEl) return;
+    const list = appEl.querySelector(".cxp-list");
+    if (!list) return;
+
+    for (const li of list.querySelectorAll("li")) {
+      if (li.querySelector(".cgm-xp-request-actor")) continue; // Already injected
+      if (li.classList.contains("cxp-empty")) continue;
+
+      // Find actorId from approve/reject buttons
+      const btn = li.querySelector("[data-actor-id]");
+      const actorId = btn?.dataset?.actorId;
+      if (!actorId) continue;
+
+      const actor = game.actors.get(actorId);
+      if (!actor) continue;
+
+      const actorEl = document.createElement("span");
+      actorEl.className = "cgm-xp-request-actor";
+      actorEl.innerHTML = `
+        <img src="${actor.img || "icons/svg/mystery-man.svg"}" alt="${actor.name}">
+        <span>${actor.name}</span>
+      `;
+
+      const label = li.querySelector(".cxp-list-label");
+      if (label) label.insertAdjacentElement("beforebegin", actorEl);
+      else li.insertAdjacentElement("afterbegin", actorEl);
+    }
+  }
+
+  /** Watch the GM Dashboard for tab changes and re-renders to re-inject actor icons */
+  _watchXpRequestsTab(appEl) {
+    if (!appEl) return;
+    const observer = new MutationObserver(() => {
+      // Re-inject header if it was destroyed by Foundry re-render
+      if (!appEl.querySelector(".cgm-xp-dashboard-header")) {
+        this._injectXpDashboardHeader(appEl);
+      }
+      // Re-inject history tab if it was destroyed by Foundry re-render
+      if (!appEl.querySelector("[data-tab='history']")) {
+        this._injectXpHistoryTab(appEl);
+      }
+      // If requests tab is visible, inject actor icons
+      if (appEl.querySelector("[data-tab='requests']")?.classList.contains("active") ||
+          appEl.querySelector(".cxp-list")) {
+        this._injectXpRequestActorIcons(appEl);
+      }
+    });
+    observer.observe(appEl, { childList: true, subtree: true });
+    // Store observer on appEl so it can be cleaned up later
+    appEl._cgmRequestObserver = observer;
+  }
+
+  /** Inject a History tab into the Cypher XP GM Dashboard */
+  _injectXpHistoryTab(appEl) {
+    if (!appEl) return;
+    const tabsNav = appEl.querySelector(".cxp-tabs");
+    if (!tabsNav) return;
+
+    // Create the History tab link if missing
+    let historyTab = tabsNav.querySelector("[data-tab='history']");
+    if (!historyTab) {
+      historyTab = document.createElement("a");
+      historyTab.dataset.action = "changeTab";
+      historyTab.dataset.tab = "history";
+      historyTab.textContent = "History";
+      historyTab.className = "";
+      tabsNav.appendChild(historyTab);
+    }
+
+    // Create the history panel if missing (hidden by default)
+    const tabContent = appEl.querySelector(".cxp-tab-content");
+    if (tabContent) {
+      let historyPanel = tabContent.querySelector(".cgm-xp-history-panel");
+      if (!historyPanel) {
+        historyPanel = document.createElement("div");
+        historyPanel.className = "cgm-xp-history-panel";
+        historyPanel.style.display = "none";
+        tabContent.appendChild(historyPanel);
+      }
+    }
+
+    // Attach click handler once only
+    if (tabsNav._cgmHistoryClickAttached) return;
+    tabsNav._cgmHistoryClickAttached = true;
+
+    tabsNav.addEventListener("click", (e) => {
+      const target = e.target.closest("[data-action='changeTab']");
+      if (!target) return;
+      const tab = target.dataset.tab;
+      const historyPanel = appEl.querySelector(".cgm-xp-history-panel");
+      if (!historyPanel) return;
+
+      if (tab === "history") {
+        e.preventDefault();
+        e.stopPropagation();
+        for (const a of tabsNav.querySelectorAll("a")) a.classList.remove("active");
+        target.classList.add("active");
+        for (const child of tabContent.children) {
+          if (!child.classList.contains("cgm-xp-history-panel")) {
+            child.style.display = "none";
+          }
+        }
+        historyPanel.style.display = "block";
+        this._renderXpHistoryPanel(historyPanel);
+      } else {
+        historyPanel.style.display = "none";
+        for (const child of tabContent.children) {
+          if (!child.classList.contains("cgm-xp-history-panel")) {
+            child.style.display = "";
+          }
+        }
+      }
+    });
+  }
+
+  /** Render the history log into the history panel */
+  _renderXpHistoryPanel(panel) {
+    if (!panel) return;
+    const entries = [...this._xpActionHistory].reverse(); // newest first
+    if (!entries.length) {
+      panel.innerHTML = `<div class="cgm-xp-history-empty">No actions recorded yet.</div>`;
+      return;
+    }
+
+    const formatTime = (ts) => {
+      const d = new Date(ts);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    };
+
+    const getIcon = (type) => {
+      switch (type) {
+        case "awardXP": return "fa-gift";
+        case "adjustXpUp": return "fa-arrow-up";
+        case "adjustXpDown": return "fa-arrow-down";
+        case "requestCreated": return "fa-file-circle-plus";
+        case "requestApproved": return "fa-check";
+        case "requestRejected": return "fa-xmark";
+        case "tierBreakthrough": return "fa-arrow-up";
+        case "purchaseApplied": return "fa-cart-shopping";
+        default: return "fa-circle";
+      }
+    };
+
+    const getLabel = (entry) => {
+      switch (entry.type) {
+        case "awardXP": return `Awarded <strong>${entry.amount} XP</strong> to ${entry.actorName}${entry.reason ? ` — "${entry.reason}"` : ""}`;
+        case "adjustXpUp": return `Raised <strong>${entry.actorName}</strong> by <strong>+${entry.amount} XP</strong>${entry.reason ? ` — "${entry.reason}"` : ""}`;
+        case "adjustXpDown": return `Lowered <strong>${entry.actorName}</strong> by <strong>-${entry.amount} XP</strong>${entry.reason ? ` — "${entry.reason}"` : ""}`;
+        case "requestCreated": return `<strong>${entry.actorName}</strong> requested <strong>${entry.label}</strong> (${entry.requestedCost} XP)`;
+        case "requestApproved": return `Approved <strong>${entry.label}</strong> for ${entry.actorName}`;
+        case "requestRejected": return `Rejected <strong>${entry.label}</strong> for ${entry.actorName}`;
+        case "tierBreakthrough": return `<strong>${entry.actorName}</strong> advanced from Tier ${entry.fromTier} → ${entry.toTier}`;
+        case "purchaseApplied": return `<strong>${entry.actorName}</strong> purchased <strong>${entry.label}</strong> (${entry.cost} XP)`;
+        default: return entry.label || "Unknown action";
+      }
+    };
+
+    const html = entries.map((entry, i) => {
+      const isUndone = entry.undone;
+      const isCurrent = (this._xpActionHistory.length - 1 - i) === this._xpHistoryIndex;
+      return `
+        <div class="cgm-xp-history-item ${isUndone ? 'cgm-xp-history-undone' : ''} ${isCurrent ? 'cgm-xp-history-current' : ''}">
+          <img src="${entry.actorImg || 'icons/svg/mystery-man.svg'}" alt="" class="cgm-xp-history-avatar">
+          <div class="cgm-xp-history-body">
+            <div class="cgm-xp-history-time">${formatTime(entry.timestamp)}</div>
+            <div class="cgm-xp-history-text"><i class="fas ${getIcon(entry.type)}"></i> ${getLabel(entry)}</div>
+          </div>
+          ${isCurrent ? '<span class="cgm-xp-history-marker" title="Current position">●</span>' : ''}
+        </div>
+      `;
+    }).join("");
+
+    panel.innerHTML = `<div class="cgm-xp-history-list">${html}</div>`;
+  }
+
+  /** Inline award XP flow — replicates cypher-xp DevelopmentService.gmAward */
+  async _awardXpFlow() {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
+    if (!actors.length) return ui.notifications.warn("Cypher XP: no player-owned PCs found.");
+
+    const options = actors.map(a => `<option value="${a.id}">${a.name}</option>`).join("");
+    const actorId = await foundry.applications.api.DialogV2.prompt({
+      window: { title: "Award XP — Choose Character" },
+      content: `<label>Character: <select name="actorId">${options}</select></label>`,
+      ok: { callback: (event, button, dialog) => dialog.element.querySelector("select[name='actorId']").value }
+    }).catch(() => null);
+    if (!actorId) return;
+
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+
+    const result = await foundry.applications.api.DialogV2.prompt({
+      window: { title: `Award XP: ${actor.name}` },
+      content: `
+        <label>Amount: <input type="number" name="amount" value="1" min="1" step="1"></label><br>
+        <label>Reason: <input type="text" name="reason" placeholder="Discovery, GM award, etc."></label>`,
+      ok: { callback: (event, button, dialog) => ({
+        amount: Number(dialog.element.querySelector("input[name='amount']").value),
+        reason: dialog.element.querySelector("input[name='reason']").value
+      }) }
+    }).catch(() => null);
+    if (!result || !Number.isInteger(result.amount) || result.amount <= 0) return;
+
+    try {
+      // Try to dynamically import cypher-xp DevelopmentService
+      let ds = null;
+      try {
+        const mod = await import("/modules/cypher-xp/scripts/development-service.js");
+        ds = mod.DevelopmentService;
+      } catch (e) {
+        console.log(`${MODULE_ID} | Dynamic import of cypher-xp DevelopmentService failed, using fallback`);
+      }
+
+      if (ds?.gmAward) {
+        await ds.gmAward(actor, result.amount, result.reason);
+      } else {
+        // Fallback: manually replicate gmAward logic
+        // 1. Update actor's actual XP
+        const currentXP = Number(actor.system?.basic?.xp ?? 0);
+        await actor.update({ "system.basic.xp": currentXP + result.amount });
+
+        // 2. Save transaction to cypher-xp flags
+        const data = actor.getFlag("cypher-xp", "data") || {};
+        if (!data.transactions) data.transactions = [];
+        data.transactions.push({
+          id: foundry.utils.randomID(),
+          timestamp: Date.now(),
+          type: "gm-award",
+          label: result.reason || "GM Award",
+          xpDelta: result.amount,
+          progressDelta: 0,
+          actorUuid: actor.uuid,
+          source: "gm-manual",
+          status: "applied",
+          metadata: {}
+        });
+        await actor.setFlag("cypher-xp", "data", data);
+
+        // Only push to history in fallback (hook handles it when ds.gmAward is used)
+        this._pushXpHistory({
+          type: "awardXP",
+          actorId: actor.id,
+          actorName: actor.name,
+          actorImg: actor.img,
+          amount: result.amount,
+          reason: result.reason || "GM Award",
+          timestamp: Date.now(),
+          undone: false
+        });
+      }
+
+      ui.notifications.info(`Cypher XP: awarded ${result.amount} XP to ${actor.name}.`);
+    } catch (e) {
+      console.warn(`${MODULE_ID} | Award XP failed:`, e);
+      ui.notifications.error("Failed to award XP. See console for details.");
+    }
+  }
+
+  /** Adjust XP flow — raise or lower any actor's XP directly */
+  async _adjustXpFlow() {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
+    if (!actors.length) return ui.notifications.warn("Cypher XP: no player-owned PCs found.");
+
+    const options = actors.map(a => `<option value="${a.id}">${a.name} (current: ${a.system?.basic?.xp ?? 0} XP)</option>`).join("");
+    const actorId = await foundry.applications.api.DialogV2.prompt({
+      window: { title: "Adjust XP — Choose Character" },
+      content: `<label>Character: <select name="actorId">${options}</select></label>`,
+      ok: { callback: (event, button, dialog) => dialog.element.querySelector("select[name='actorId']").value }
+    }).catch(() => null);
+    if (!actorId) return;
+
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const currentXP = Number(actor.system?.basic?.xp ?? 0);
+
+    const result = await foundry.applications.api.DialogV2.prompt({
+      window: { title: `Adjust XP: ${actor.name}` },
+      content: `
+        <p>Current XP: <strong>${currentXP}</strong></p>
+        <label>Amount (+ to raise, – to lower): <input type="number" name="amount" value="0" step="1"></label><br>
+        <label>Reason: <input type="text" name="reason" placeholder="Correction, mistake, etc."></label>`,
+      ok: { callback: (event, button, dialog) => ({
+        amount: Number(dialog.element.querySelector("input[name='amount']").value),
+        reason: dialog.element.querySelector("input[name='reason']").value
+      }) }
+    }).catch(() => null);
+    if (result === null || result.amount === 0 || !Number.isFinite(result.amount)) return;
+
+    try {
+      const newXP = Math.max(0, currentXP + result.amount);
+      await actor.update({ "system.basic.xp": newXP });
+
+      // Log to history
+      const actionType = result.amount > 0 ? "adjustXpUp" : "adjustXpDown";
+      this._pushXpHistory({
+        type: actionType,
+        actorId: actor.id,
+        actorName: actor.name,
+        actorImg: actor.img,
+        amount: Math.abs(result.amount),
+        delta: result.amount,
+        reason: result.reason || "XP Adjustment",
+        timestamp: Date.now(),
+        undone: false
+      });
+
+      const direction = result.amount > 0 ? "raised" : "lowered";
+      ui.notifications.info(`Cypher XP: ${direction} ${actor.name} by ${Math.abs(result.amount)} XP (now ${newXP}).`);
+      this._refreshHistoryView();
+    } catch (e) {
+      console.warn(`${MODULE_ID} | Adjust XP failed:`, e);
+      ui.notifications.error("Failed to adjust XP. See console for details.");
+    }
+  }
+
+  /** Push an action to the undo history stack */
+  _pushXpHistory(action) {
+    // Remove any redo entries ahead of current index
+    if (this._xpHistoryIndex < this._xpActionHistory.length - 1) {
+      this._xpActionHistory = this._xpActionHistory.slice(0, this._xpHistoryIndex + 1);
+    }
+    this._xpActionHistory.push(action);
+    if (this._xpActionHistory.length > this._xpMaxHistory) {
+      this._xpActionHistory.shift();
+      // Index stays same since we removed from front, but if it was -1 it becomes 0
+      if (this._xpHistoryIndex < 0) this._xpHistoryIndex = 0;
+    } else {
+      this._xpHistoryIndex++;
+    }
+  }
+
+  /** Update undo/redo button states in the dashboard header */
+  _updateUndoRedoState(headerEl) {
+    const undoBtn = headerEl.querySelector("[data-action='undo']");
+    const redoBtn = headerEl.querySelector("[data-action='redo']");
+    if (undoBtn) undoBtn.classList.toggle("cgm-xp-disabled", this._xpHistoryIndex < 0);
+    if (redoBtn) redoBtn.classList.toggle("cgm-xp-disabled", this._xpHistoryIndex >= this._xpActionHistory.length - 1);
+  }
+
+  /** Undo the last action */
+  async _undoLastAction() {
+    if (this._xpHistoryIndex < 0) return ui.notifications.warn("Nothing to undo.");
+    const action = this._xpActionHistory[this._xpHistoryIndex];
+    this._xpHistoryIndex--;
+    action.undone = true;
+
+    try {
+      if (action.type === "awardXP") {
+        const actor = game.actors.get(action.actorId);
+        if (!actor) throw new Error("Actor no longer found");
+
+        // Subtract the awarded XP
+        const currentXP = Number(actor.system?.basic?.xp ?? 0);
+        const newXP = Math.max(0, currentXP - action.amount);
+        await actor.update({ "system.basic.xp": newXP });
+
+        // Remove the transaction from cypher-xp flags
+        const data = actor.getFlag("cypher-xp", "data") || {};
+        if (data.transactions) {
+          const idx = data.transactions.findLastIndex(t =>
+            t.type === "gm-award" && t.xpDelta === action.amount && t.label === action.reason
+          );
+          if (idx >= 0) data.transactions.splice(idx, 1);
+        }
+        await actor.setFlag("cypher-xp", "data", data);
+
+        ui.notifications.info(`Undid: ${action.amount} XP award to ${action.actorName}.`);
+      } else if (action.type === "adjustXpUp" || action.type === "adjustXpDown") {
+        const actor = game.actors.get(action.actorId);
+        if (!actor) throw new Error("Actor no longer found");
+
+        // Reverse the adjustment (subtract what was added, add back what was removed)
+        const currentXP = Number(actor.system?.basic?.xp ?? 0);
+        const newXP = Math.max(0, currentXP - action.delta);
+        await actor.update({ "system.basic.xp": newXP });
+
+        const direction = action.type === "adjustXpUp" ? "raise" : "lowering";
+        ui.notifications.info(`Undid: ${direction} ${action.actorName} by ${action.amount} XP.`);
+      }
+      this._refreshHistoryView();
+    } catch (e) {
+      console.warn(`${MODULE_ID} | Undo failed:`, e);
+      ui.notifications.error("Undo failed. See console for details.");
+      this._xpHistoryIndex++; // Roll back index since undo failed
+      action.undone = false;
+    }
+  }
+
+  /** Redo the last undone action */
+  async _redoLastAction() {
+    if (this._xpHistoryIndex >= this._xpActionHistory.length - 1) return ui.notifications.warn("Nothing to redo.");
+    this._xpHistoryIndex++;
+    const action = this._xpActionHistory[this._xpHistoryIndex];
+    action.undone = false;
+
+    try {
+      if (action.type === "awardXP") {
+        const actor = game.actors.get(action.actorId);
+        if (!actor) throw new Error("Actor no longer found");
+
+        // Re-add the XP
+        const currentXP = Number(actor.system?.basic?.xp ?? 0);
+        await actor.update({ "system.basic.xp": currentXP + action.amount });
+
+        // Re-add the transaction
+        const data = actor.getFlag("cypher-xp", "data") || {};
+        if (!data.transactions) data.transactions = [];
+        data.transactions.push({
+          id: foundry.utils.randomID(),
+          timestamp: Date.now(),
+          type: "gm-award",
+          label: action.reason,
+          xpDelta: action.amount,
+          progressDelta: 0,
+          actorUuid: actor.uuid,
+          source: "gm-manual",
+          status: "applied",
+          metadata: {}
+        });
+        await actor.setFlag("cypher-xp", "data", data);
+
+        ui.notifications.info(`Redone: ${action.amount} XP award to ${action.actorName}.`);
+      } else if (action.type === "adjustXpUp" || action.type === "adjustXpDown") {
+        const actor = game.actors.get(action.actorId);
+        if (!actor) throw new Error("Actor no longer found");
+
+        // Re-apply the adjustment
+        const currentXP = Number(actor.system?.basic?.xp ?? 0);
+        const newXP = Math.max(0, currentXP + action.delta);
+        await actor.update({ "system.basic.xp": newXP });
+
+        const direction = action.type === "adjustXpUp" ? "raised" : "lowered";
+        ui.notifications.info(`Redone: ${direction} ${action.actorName} by ${action.amount} XP.`);
+      }
+      this._refreshHistoryView();
+    } catch (e) {
+      console.warn(`${MODULE_ID} | Redo failed:`, e);
+      ui.notifications.error("Redo failed. See console for details.");
+      this._xpHistoryIndex--; // Roll back index since redo failed
+      action.undone = true;
+    }
+  }
+
+  _hideCypherXpLauncher() {
+    const ids = ["cypher-xp-player-launcher", "cypher-development-track-player-launcher", "cypher-xp-gm-launcher-wrapper"];
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.style.display = "none";
+        el.style.visibility = "hidden";
+        el.style.opacity = "0";
+        el.style.pointerEvents = "none";
+      }
+    }
+  }
+
+  _flashXpButton(type = "default") {
+    const btn = this.element?.querySelector(".cgm-xp-btn");
+    if (!btn) return;
+    // Remove any existing flash classes first
+    btn.classList.remove("cgm-xp-flash", "cgm-xp-flash-pending", "cgm-xp-flash-tier");
+    // Add appropriate flash class
+    if (type === "pending") btn.classList.add("cgm-xp-flash-pending");
+    else if (type === "tier") btn.classList.add("cgm-xp-flash-tier");
+    else btn.classList.add("cgm-xp-flash");
+    // Clear any existing timer
+    if (this._xpFlashTimer) clearTimeout(this._xpFlashTimer);
+    // For default (player request), auto-remove after 3s
+    if (type === "default") {
+      this._xpFlashTimer = setTimeout(() => btn.classList.remove("cgm-xp-flash"), 3000);
+    }
+  }
+
+  /** Start periodic check for pending requests / tier-ready and flash button accordingly */
+  _startXpButtonStatusCheck() {
+    if (this._xpButtonStatusInterval) clearInterval(this._xpButtonStatusInterval);
+    this._xpButtonStatusInterval = setInterval(() => {
+      if (!this.element) return;
+      const pending = this._getXpPendingCount();
+      const tierReady = this._getXpTierReadyCount();
+      const btn = this.element.querySelector(".cgm-xp-btn");
+      if (!btn) return;
+      // Priority: pending (yellow) > tier ready (blue)
+      if (pending > 0) {
+        if (!btn.classList.contains("cgm-xp-flash-pending")) {
+          this._flashXpButton("pending");
+        }
+      } else if (tierReady > 0) {
+        if (!btn.classList.contains("cgm-xp-flash-tier")) {
+          this._flashXpButton("tier");
+        }
+      } else {
+        // No alerts — remove persistent flash classes (keep transient cgm-xp-flash)
+        btn.classList.remove("cgm-xp-flash-pending", "cgm-xp-flash-tier");
+      }
+    }, 4000);
   }
 
   /* Load saved panel positions from synced settings (with localStorage fallback for migration) */
@@ -245,6 +1217,11 @@ class GMTaskbar {
     this._compact = this._gs("compact", false);
     this._notes = this._gs("notes", "");
     this._globalDifficulty = this._gs("globalDifficulty", 4);
+    // Sync GM Taskbar global difficulty to direct setting and Cypher System's rollDifficulty on load
+    try { game.settings.set(MODULE_ID, "globalDifficulty", this._globalDifficulty); } catch (e) {}
+    if (game.settings.settings.has("cyphersystem.rollDifficulty")) {
+      game.settings.set("cyphersystem", "rollDifficulty", this._globalDifficulty);
+    }
     this._locked = this._gs("locked", true);
     this._portraitPosition = this._gs("portraitPosition", "left");
     this._portraitSize = this._gs("portraitSize", 48);
@@ -320,6 +1297,8 @@ class GMTaskbar {
     if (this._playerMonitorInterval) clearInterval(this._playerMonitorInterval);
     if (this._autoHideTimer) clearTimeout(this._autoHideTimer);
     if (this._trayInterval) clearInterval(this._trayInterval);
+    if (this._xpCountInterval) clearInterval(this._xpCountInterval);
+    if (this._xpButtonStatusInterval) clearInterval(this._xpButtonStatusInterval);
 
     const bar = document.createElement("div");
     bar.id = `${MODULE_ID}-bar`;
@@ -329,6 +1308,9 @@ class GMTaskbar {
     bar.innerHTML = this._buildHTML();
     document.body.appendChild(bar);
     this.element = bar;
+
+    // Hide Cypher XP floating launcher when integrated with taskbar
+    this._hideCypherXpLauncher();
 
     // Create portrait background panel as separate element (behind bar)
     this._createPortraitBg();
@@ -342,6 +1324,7 @@ class GMTaskbar {
     this._startPlayerMonitor();
     this._setupAutoHide();
     this._startTray();              // start minimized window tray
+    this._startXpButtonStatusCheck(); // flash button on pending/tier-ready
 
     // Sync portrait background width to match float (after DOM is ready)
     this._syncPortraitBgWidth();
@@ -395,6 +1378,7 @@ class GMTaskbar {
       { id: "enemy", action: "openEnemyCanvas", icon: "fa-tooth", color: "#cc3333", title: "Enemy Canvas", defaultSection: 1 },
       { id: "items", action: "openItemsCanvas", icon: "fa-hammer", color: "", title: "Items", defaultSection: 1 },
       { id: "reputation", action: "openReputation", icon: "fa-handshake", color: "#e8a87c", title: "Reputation and gossips", defaultSection: 1 },
+      { id: "connections", action: "openConnections", icon: "fa-project-diagram", color: "#c9a227", title: "Connections", defaultSection: 1, requiresModule: "cypher-connections" },
       { id: "recovery", action: "openRecoveryMenu", icon: "fa-droplet", color: "#3b82f6", title: "Recovery", defaultSection: 0 },
     ];
     // Merge with dynamically discovered buttons (injected by other modules)
@@ -592,7 +1576,12 @@ class GMTaskbar {
 
       <div class="cgm-inner">
         <!-- Left side: GM Brand + Global Difficulty Box -->
-        <div class="cgm-brand"><i class="fas fa-dungeon"></i> GM</div>
+        <button class="cgm-brand" data-action="openGMMenu" title="GM Menu"><i class="fas fa-dungeon"></i> GM</button>
+
+        <!-- Cypher XP button (always shown, checks on click) -->
+        <button class="cgm-icon-btn cgm-xp-btn" id="cgm-btn-xp" title="Cypher XP">
+          <i class="fas fa-star" style="color:#ffd700;"></i>
+        </button>
 
         <!-- Global Difficulty Box -->
         <div class="cgm-difficulty-box" title="Global Difficulty (TN ${tn})">
@@ -631,6 +1620,15 @@ class GMTaskbar {
             </div>
           </div>
         </div>
+
+        <!-- Cypher Connections button (shown only when module is active) -->
+        ${game.modules?.get("cypher-connections")?.active ? `
+        <div class="cgm-connections-wrap">
+          <button class="cgm-icon-btn cgm-connections-btn" data-action="openConnections" title="Connections">
+            <i class="fas fa-project-diagram" style="color:#c9a227;"></i>
+          </button>
+        </div>
+        ` : ""}
 
         <!-- SECTION 1 -->
         ${secHTML}
@@ -1259,11 +2257,316 @@ ${paths}  </svg>
     this._hideCallForRollSkillSubMenu();
     this._hideCallForRollFrequentSubMenu();
     this._hideGMGroupRollMenu();
+    this._hideGMMenu();
     this._hideGMGroupRollAttributes();
     this._hideGMGroupRollSkills();
     this._hideGMGroupRollFree();
     this._hideGMGroupRollDefense();
     this._groupStatuses.hide();
+  }
+
+  /* ─── GM Menu (Windows-style) ─── */
+  _getGMMenuDocs() {
+    try {
+      const raw = game.settings.get(MODULE_ID, "gmMenuDocs");
+      return JSON.parse(raw || "{}");
+    } catch {
+      return { shared: [], gm: [], notes: [] };
+    }
+  }
+
+  async _saveGMMenuDocs(data) {
+    await game.settings.set(MODULE_ID, "gmMenuDocs", JSON.stringify(data));
+  }
+
+  async _addDocToMenu(section, uuid) {
+    const docs = this._getGMMenuDocs();
+    if (!docs[section]) docs[section] = [];
+    if (!docs[section].includes(uuid)) {
+      docs[section].push(uuid);
+      await this._saveGMMenuDocs(docs);
+    }
+    this._renderGMMenuContent();
+  }
+
+  async _removeDocFromMenu(section, uuid) {
+    const docs = this._getGMMenuDocs();
+    if (!docs[section]) return;
+    docs[section] = docs[section].filter(u => u !== uuid);
+    await this._saveGMMenuDocs(docs);
+    this._renderGMMenuContent();
+  }
+
+  _getJournalByUuid(uuid) {
+    try {
+      return fromUuidSync(uuid);
+    } catch {
+      return null;
+    }
+  }
+
+  _renderGMMenuContent() {
+    const menu = this._gmMenuEl;
+    if (!menu) return;
+    const docs = this._getGMMenuDocs();
+    const sections = [
+      { id: "shared", label: "SHARED", icon: "fa-book-open", color: "#4ade80" },
+      { id: "gm", label: "GM", icon: "fa-book", color: "#f87171" },
+      { id: "notes", label: "Notes", icon: "fa-note-sticky", color: "#fbbf24" },
+    ];
+
+    sections.forEach(sec => {
+      const listEl = menu.querySelector(`.cgm-gm-menu-list[data-section="${sec.id}"]`);
+      if (!listEl) return;
+      const uuids = docs[sec.id] || [];
+      const items = uuids.map(uuid => {
+        const doc = this._getJournalByUuid(uuid);
+        if (!doc) return null;
+        return { uuid, name: doc.name, img: doc.img || "icons/svg/book.svg" };
+      }).filter(Boolean);
+
+      if (items.length === 0) {
+        listEl.innerHTML = `<div class="cgm-gm-menu-empty">Drop journals here</div>`;
+      } else {
+        listEl.innerHTML = items.map(item => `
+          <div class="cgm-gm-menu-item" data-uuid="${item.uuid}" draggable="true">
+            <img src="${item.img}" alt="">
+            <span>${foundry.utils.escapeHTML(item.name)}</span>
+            <button class="cgm-gm-menu-item-remove" data-uuid="${item.uuid}" title="Remove"><i class="fas fa-times"></i></button>
+          </div>
+        `).join("");
+      }
+
+      // Re-bind drag events
+      listEl.querySelectorAll(".cgm-gm-menu-item").forEach(item => {
+        item.addEventListener("dragstart", (e) => {
+          e.dataTransfer.setData("text/plain", item.dataset.uuid);
+          e.dataTransfer.effectAllowed = "move";
+          item.classList.add("cgm-gm-menu-item-dragging");
+        });
+        item.addEventListener("dragend", () => {
+          item.classList.remove("cgm-gm-menu-item-dragging");
+        });
+      });
+
+      // Re-bind remove buttons
+      listEl.querySelectorAll(".cgm-gm-menu-item-remove").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          await this._removeDocFromMenu(sec.id, btn.dataset.uuid);
+        });
+      });
+
+      // Re-bind click to open
+      listEl.querySelectorAll(".cgm-gm-menu-item").forEach(item => {
+        item.addEventListener("click", () => {
+          const doc = this._getJournalByUuid(item.dataset.uuid);
+          if (doc) doc.sheet.render(true);
+        });
+      });
+    });
+  }
+
+  _showGMMenu(btnEl) {
+    this._hideGMMenu();
+
+    const menuWidth = 400;
+    const offset = 4;
+    const lockSheets = game.settings.get(MODULE_ID, "lockActorSheets");
+
+    const sections = [
+      { id: "shared", label: "SHARED", icon: "fa-book-open", color: "#4ade80" },
+      { id: "gm", label: "GM", icon: "fa-book", color: "#f87171" },
+      { id: "notes", label: "Notes", icon: "fa-note-sticky", color: "#fbbf24" },
+    ];
+
+    // Vertical action buttons — lock icon reflects CURRENT state
+    const vButtons = [
+      { action: "toggleLockSheets", icon: lockSheets ? "fa-lock" : "fa-unlock", title: lockSheets ? "Unlock actor sheets for players" : "Lock actor sheets for players", color: "#e74c3c" },
+      { action: "awardXp", icon: "fa-star", title: "Award XP", color: "#ffd700" },
+      { action: "toggleCombat", icon: "fa-swords", title: "Toggle combat", color: "#3498db" },
+      { action: "togglePause", icon: game.paused ? "fa-play" : "fa-pause", title: game.paused ? "Unpause game" : "Pause game", color: "#9b59b6" },
+      { action: "endTurn", icon: "fa-forward-step", title: "End turn", color: "#1abc9c" },
+    ];
+
+    const menu = document.createElement("div");
+    menu.className = "cgm-gm-winmenu";
+    menu.style.width = `${menuWidth}px`;
+    menu.style.minHeight = `420px`;
+    // No fixed max-height — grows with content
+
+    // Build sections HTML
+    const sectionsHtml = sections.map(sec => `
+      <div class="cgm-gm-menu-section" data-section="${sec.id}">
+        <div class="cgm-gm-menu-section-header" style="--sec-color:${sec.color}">
+          <i class="fas ${sec.icon}"></i>
+          <span>${sec.label}</span>
+        </div>
+        <div class="cgm-gm-menu-list" data-section="${sec.id}">
+          <div class="cgm-gm-menu-empty">Drop journals here</div>
+        </div>
+      </div>
+    `).join("");
+
+    const vButtonsHtml = vButtons.map((btn, i) => `
+      <button class="cgm-gm-winmenu-vbtn" data-action="${btn.action}" title="${btn.title}" style="--vbtn-color:${btn.color};--vbtn-delay:${i * 40}ms;">
+        <i class="fas ${btn.icon}"></i>
+      </button>
+    `).join("");
+
+    menu.innerHTML = `
+      <div class="cgm-gm-winmenu-header">
+        <i class="fas fa-dungeon"></i>
+        <span>GM MENU</span>
+      </div>
+      <div class="cgm-gm-winmenu-body">
+        ${sectionsHtml}
+      </div>
+      <div class="cgm-gm-winmenu-vbtns">${vButtonsHtml}</div>
+    `;
+
+    document.body.appendChild(menu);
+    this._gmMenuEl = menu;
+
+    // Position AFTER append so we can measure actual rendered height
+    // Bottom-left corner of menu sits just above the GM button
+    const rect = btnEl.getBoundingClientRect();
+    requestAnimationFrame(() => {
+      const actualHeight = menu.offsetHeight || 420;
+      const menuLeft = rect.left;
+      const menuTop = rect.top - actualHeight - offset;
+      menu.style.left = `${Math.max(8, menuLeft)}px`;
+      menu.style.top = `${Math.max(8, menuTop)}px`;
+    });
+
+    requestAnimationFrame(() => menu.classList.add("cgm-gm-winmenu-visible"));
+
+    // Make draggable (header only)
+    this._cleanupGMMenuDrag = this._makeMenuDraggable(menu, null, ".cgm-gm-winmenu-header");
+
+    // Render doc content
+    this._renderGMMenuContent();
+
+    // Vertical button clicks
+    menu.querySelectorAll(".cgm-gm-winmenu-vbtn").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const action = btn.dataset.action;
+        if (action === "toggleLockSheets") await this._toggleLockActorSheets();
+        else if (action === "awardXp") await this._awardXpFlow();
+        else if (action === "toggleCombat") await this._toggleCombat();
+        else if (action === "togglePause") game.togglePause();
+        else if (action === "endTurn") game.combat?.nextTurn();
+      });
+    });
+
+    // Drag and drop handlers for sections
+    menu.querySelectorAll(".cgm-gm-menu-list").forEach(listEl => {
+      const section = listEl.dataset.section;
+
+      listEl.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        listEl.classList.add("cgm-gm-menu-list-dragover");
+      });
+
+      listEl.addEventListener("dragleave", () => {
+        listEl.classList.remove("cgm-gm-menu-list-dragover");
+      });
+
+      listEl.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        listEl.classList.remove("cgm-gm-menu-list-dragover");
+
+        // Try to get drag data from various sources
+        let uuid = null;
+        let docType = null;
+
+        // 1) Try Foundry's native drag data first (most reliable)
+        const dragData = TextEditor.getDragEventData(e);
+        if (dragData?.uuid) {
+          uuid = dragData.uuid;
+          docType = dragData.type;
+        }
+
+        // 2) Fallback to plain text
+        if (!uuid) {
+          const text = e.dataTransfer.getData("text/plain");
+          if (text?.startsWith("JournalEntry.")) {
+            uuid = text;
+            docType = "JournalEntry";
+          } else {
+            try {
+              const parsed = JSON.parse(text);
+              if (parsed?.uuid) {
+                uuid = parsed.uuid;
+                docType = parsed.type;
+              }
+            } catch {}
+          }
+        }
+
+        if (!uuid) return;
+
+        // Accept JournalEntry by type or UUID prefix
+        const isJournal = docType === "JournalEntry" || uuid.startsWith("JournalEntry.");
+        if (!isJournal) {
+          ui.notifications.warn("Only Journal Entries can be added to GM Menu.");
+          return;
+        }
+
+        await this._addDocToMenu(section, uuid);
+      });
+    });
+
+    // Close on outside click
+    const closeOnOutside = (e) => {
+      if (!menu.contains(e.target) && !btnEl.contains(e.target)) {
+        this._hideGMMenu();
+        document.removeEventListener("click", closeOnOutside);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeOnOutside), 50);
+  }
+
+  _hideGMMenu() {
+    if (this._gmMenuEl) {
+      this._cleanupGMMenuDrag?.();
+      this._cleanupGMMenuDrag = null;
+      this._gmMenuEl.classList.remove("cgm-gm-winmenu-visible");
+      setTimeout(() => { this._gmMenuEl?.remove(); this._gmMenuEl = null; }, 200);
+    }
+  }
+
+  async _toggleLockActorSheets() {
+    const current = game.settings.get(MODULE_ID, "lockActorSheets");
+    const next = !current;
+    await game.settings.set(MODULE_ID, "lockActorSheets", next);
+    ui.notifications.info(next ? "Actor sheets are now LOCKED for players." : "Actor sheets are now UNLOCKED for players.");
+    // Refresh the lock button icon in the open GM menu
+    const menu = this._gmMenuEl;
+    if (menu) {
+      const lockBtn = menu.querySelector("[data-action='toggleLockSheets']");
+      if (lockBtn) {
+        const icon = lockBtn.querySelector("i");
+        if (icon) {
+          icon.className = next ? "fas fa-lock" : "fas fa-unlock";
+        }
+        lockBtn.title = next ? "Unlock actor sheets for players" : "Lock actor sheets for players";
+      }
+    }
+  }
+
+  async _toggleCombat() {
+    if (game.combat) {
+      await game.combat.end();
+      ui.notifications.info("Combat ended.");
+    } else if (canvas.scene) {
+      await Combat.create({ scene: canvas.scene.id });
+      ui.notifications.info("Combat started!");
+    } else {
+      ui.notifications.warn("No active scene to start combat.");
+    }
   }
 
   /* ─── GM Group Roll Request ─── */
@@ -1497,33 +2800,40 @@ ${paths}  </svg>
     menu.style.width = `${size}px`;
     menu.style.height = `${size}px`;
 
-    const rect = btnEl.getBoundingClientRect();
-    if (!rect || rect.width === 0 || rect.height === 0) {
-      console.warn("Cypher GM Taskbar: Recovery button rect is empty");
-      return;
-    }
-    const btnCx = rect.left + rect.width / 2;
-    const btnCy = rect.top + rect.height / 2;
-
-    const spaceAbove = btnCy - size / 2;
-    const spaceBelow = window.innerHeight - btnCy - size / 2;
-    let menuLeft = btnCx - size / 2;
-    let menuTop;
-    if (spaceAbove >= size + offset && spaceAbove >= spaceBelow) {
-      menuTop = rect.top - size - offset;
-    } else if (spaceBelow >= size + offset) {
-      menuTop = rect.bottom + offset;
-    } else if (spaceAbove >= size + offset) {
-      menuTop = rect.top - size - offset;
+    // Position — try saved first, then auto-position
+    const savedPos = this._loadMenuPosition("recoveryTaskbar");
+    if (savedPos) {
+      menu.style.left = `${Math.max(0, Math.min(savedPos.left, window.innerWidth - size))}px`;
+      menu.style.top = `${Math.max(0, Math.min(savedPos.top, window.innerHeight - size))}px`;
     } else {
-      menuTop = (window.innerHeight - size) / 2;
+      const rect = btnEl.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) {
+        console.warn("Cypher GM Taskbar: Recovery button rect is empty");
+        return;
+      }
+      const btnCx = rect.left + rect.width / 2;
+      const btnCy = rect.top + rect.height / 2;
+
+      const spaceAbove = btnCy - size / 2;
+      const spaceBelow = window.innerHeight - btnCy - size / 2;
+      let menuLeft = btnCx - size / 2;
+      let menuTop;
+      if (spaceAbove >= size + offset && spaceAbove >= spaceBelow) {
+        menuTop = rect.top - size - offset;
+      } else if (spaceBelow >= size + offset) {
+        menuTop = rect.bottom + offset;
+      } else if (spaceAbove >= size + offset) {
+        menuTop = rect.top - size - offset;
+      } else {
+        menuTop = (window.innerHeight - size) / 2;
+      }
+
+      menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - size - 8));
+      menuTop = Math.max(8, Math.min(menuTop, window.innerHeight - size - 8));
+
+      menu.style.left = `${menuLeft}px`;
+      menu.style.top = `${menuTop}px`;
     }
-
-    menuLeft = Math.max(8, Math.min(menuLeft, window.innerWidth - size - 8));
-    menuTop = Math.max(8, Math.min(menuTop, window.innerHeight - size - 8));
-
-    menu.style.left = `${menuLeft}px`;
-    menu.style.top = `${menuTop}px`;
 
     menu.innerHTML = `
       <svg class="cgm-pie-svg" viewBox="-${half} -${half} ${size} ${size}" width="${size}" height="${size}">
@@ -1546,6 +2856,9 @@ ${paths}  </svg>
     document.body.appendChild(menu);
     this._recoveryTaskbarMenuEl = menu;
     requestAnimationFrame(() => menu.classList.add("cgm-radial-visible"));
+
+    // Make draggable
+    this._cleanupRecoveryDrag = this._makeMenuDraggable(menu, "recoveryTaskbar");
 
     const onSegClick = (e) => {
       e.stopPropagation();
@@ -1583,11 +2896,12 @@ ${paths}  </svg>
 
   _hideRecoveryTaskbarMenu() {
     if (this._recoveryTaskbarMenuEl) {
+      this._cleanupRecoveryDrag?.();
+      this._cleanupRecoveryDrag = null;
       this._recoveryTaskbarMenuEl.classList.remove("cgm-radial-visible");
       setTimeout(() => { this._recoveryTaskbarMenuEl?.remove(); this._recoveryTaskbarMenuEl = null; }, 200);
     }
   }
-
   /* ═══════════════════════════════════════════════════════════════
      REPUTATION PANEL
      ═══════════════════════════════════════════════════════════════ */
@@ -2777,14 +4091,16 @@ ${paths}  </svg>
     }
   }
 
-  _makeMenuDraggable(menu, settingKey) {
+  _makeMenuDraggable(menu, settingKey, handleSelector = null) {
     let isDragging = false;
     let startX = 0, startY = 0, startLeft = 0, startTop = 0;
     let hasMoved = false;
 
+    const dragTarget = handleSelector ? menu.querySelector(handleSelector) || menu : menu;
+
     const onPointerDown = (e) => {
       // Don't drag if clicking on interactive elements (segments, labels, back arrow, or adjuster buttons)
-      if (e.target.closest(".cgm-pie-seg, .cgm-pie-label, .cgm-gmroll-back, .cgm-pools-adj-btn, .cgm-gstatus-confirm-btn")) return;
+      if (e.target.closest(".cgm-pie-seg, .cgm-pie-label, .cgm-gmroll-back, .cgm-pools-adj-btn, .cgm-gstatus-confirm-btn, .cgm-gm-menu-item, .cgm-gm-winmenu-vbtn")) return;
       isDragging = true;
       hasMoved = false;
       startX = e.clientX;
@@ -2810,19 +4126,19 @@ ${paths}  </svg>
       isDragging = false;
       menu.classList.remove("cgm-menu-dragging");
       menu.releasePointerCapture?.(e.pointerId);
-      if (hasMoved) {
+      if (hasMoved && settingKey) {
         this._saveMenuPosition(settingKey, parseFloat(menu.style.left), parseFloat(menu.style.top));
       }
     };
 
-    menu.addEventListener("pointerdown", onPointerDown);
+    dragTarget.addEventListener("pointerdown", onPointerDown);
     menu.addEventListener("pointermove", onPointerMove);
     menu.addEventListener("pointerup", onPointerUp);
     menu.addEventListener("pointercancel", onPointerUp);
 
     // Return cleanup function
     return () => {
-      menu.removeEventListener("pointerdown", onPointerDown);
+      dragTarget.removeEventListener("pointerdown", onPointerDown);
       menu.removeEventListener("pointermove", onPointerMove);
       menu.removeEventListener("pointerup", onPointerUp);
       menu.removeEventListener("pointercancel", onPointerUp);
@@ -4242,7 +5558,11 @@ ${paths}  </svg>
     // 1. Individual actor difficulty (set via GM Taskbar Target button)
     const individual = actor.getFlag("cypher-gm-taskbar", "targetDifficulty");
     if (Number.isFinite(individual)) return Math.max(0, Math.min(15, individual));
-    // 2. Global difficulty from GM Taskbar settings
+    // 2. Global difficulty: prefer Cypher System's rollDifficulty setting (canonical), fall back to taskbar local
+    const cypherGlobal = game.settings.settings.has("cyphersystem.rollDifficulty")
+      ? game.settings.get("cyphersystem", "rollDifficulty")
+      : undefined;
+    if (Number.isFinite(cypherGlobal)) return Math.max(0, Math.min(15, cypherGlobal));
     return this._globalDifficulty ?? null;
   }
 
@@ -6629,8 +7949,9 @@ ${paths}  </svg>
 
   /* Update baseDifficulty on any open Cypher System roll dialogs */
   _updateOpenRollDialogs() {
-    const dialogs = Object.values(ui.windows).filter(app => app.constructor.name === "RollEngineDialogSheet");
-    for (const dialog of dialogs) {
+    // ── 1. Update Cypher System RollEngineDialogSheet instances ──
+    const rollDialogs = Object.values(ui.windows).filter(app => app.constructor.name === "RollEngineDialogSheet");
+    for (const dialog of rollDialogs) {
       const actor = fromUuidSync(dialog.object?.actorUuid);
       if (!actor) continue;
 
@@ -6653,6 +7974,47 @@ ${paths}  </svg>
       // Apply directly to the DOM select element
       const el = dialog.element?.[0] || dialog.element;
       const select = el?.querySelector?.('select[name="baseDifficulty"]') || el?.querySelector?.('select.base-difficulty');
+      if (select) {
+        const strVal = String(difficulty);
+        if (select.value !== strVal) {
+          select.value = strVal;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }
+    }
+
+    // ── 2. Update Cypher Taskbar native roll dialogs ──
+    // These are generic Dialog instances with ct-native-skill-roll-form or ct-native-attribute-roll-form
+    const cypherTaskbarDialogs = Object.values(ui.windows).filter(app => {
+      if (app.constructor.name !== "Dialog") return false;
+      const el = app.element?.[0] || app.element;
+      if (!el) return false;
+      return el.querySelector('.ct-native-skill-roll-form, .ct-native-attribute-roll-form') !== null;
+    });
+
+    for (const dialog of cypherTaskbarDialogs) {
+      // Try to determine the actor — the Cypher Taskbar stores it on the dialog or we infer from title
+      // The Cypher Taskbar dialogs don't carry actorUuid, but we know the Cypher Taskbar instance
+      const ctb = window.CypherTaskbar?.instance;
+      const actor = ctb?.actor;
+      if (!actor) continue;
+
+      let difficulty = actor.getFlag("cypher-gm-taskbar", "targetDifficulty");
+      if (difficulty === undefined || difficulty === null) {
+        difficulty = this._globalDifficulty;
+      }
+      difficulty = parseInt(difficulty, 10);
+      if (isNaN(difficulty) || difficulty < 0 || difficulty > 15) continue;
+
+      // Only update if the applied difficulty would change
+      if (dialog._cgmAppliedActor === actor.id && dialog._cgmAppliedDifficulty === difficulty) continue;
+
+      dialog._cgmAppliedActor = actor.id;
+      dialog._cgmAppliedDifficulty = difficulty;
+
+      // Apply directly to the DOM select element
+      const el = dialog.element?.[0] || dialog.element;
+      const select = el?.querySelector?.('select[name="baseDifficulty"]');
       if (select) {
         const strVal = String(difficulty);
         if (select.value !== strVal) {
@@ -7351,10 +8713,25 @@ ${paths}  </svg>
       });
     });
 
+    // Cypher XP button
+    const xpBtn = this.element.querySelector("#cgm-btn-xp");
+    if (xpBtn) {
+      xpBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await this._openCypherXpApp(xpBtn);
+      });
+    }
+
     // Global difficulty controls
     this.element.querySelector('[data-action="globalDiffDown"]')?.addEventListener("click", async () => {
       this._globalDifficulty = Math.max(0, this._globalDifficulty - 1);
       await this._ss("globalDifficulty", this._globalDifficulty);
+      // Also update the direct setting so player-side modules (e.g. Cypher Taskbar) can read it
+      try { await game.settings.set(MODULE_ID, "globalDifficulty", this._globalDifficulty); } catch (e) {}
+      // Sync to Cypher System's global roll difficulty setting so new roll dialogs pick it up
+      if (game.settings.settings.has("cyphersystem.rollDifficulty")) {
+        await game.settings.set("cyphersystem", "rollDifficulty", this._globalDifficulty);
+      }
       this._updateDifficultyBox();
       this._refreshPortraits();
       this._updateOpenRollDialogs();
@@ -7362,6 +8739,12 @@ ${paths}  </svg>
     this.element.querySelector('[data-action="globalDiffUp"]')?.addEventListener("click", async () => {
       this._globalDifficulty = Math.min(15, this._globalDifficulty + 1);
       await this._ss("globalDifficulty", this._globalDifficulty);
+      // Also update the direct setting so player-side modules (e.g. Cypher Taskbar) can read it
+      try { await game.settings.set(MODULE_ID, "globalDifficulty", this._globalDifficulty); } catch (e) {}
+      // Sync to Cypher System's global roll difficulty setting so new roll dialogs pick it up
+      if (game.settings.settings.has("cyphersystem.rollDifficulty")) {
+        await game.settings.set("cyphersystem", "rollDifficulty", this._globalDifficulty);
+      }
       this._updateDifficultyBox();
       this._refreshPortraits();
       this._updateOpenRollDialogs();
@@ -7369,6 +8752,12 @@ ${paths}  </svg>
     this.element.querySelector('[data-action="globalDiffReset"]')?.addEventListener("click", async () => {
       this._globalDifficulty = 4;
       await this._ss("globalDifficulty", 4);
+      // Also update the direct setting so player-side modules (e.g. Cypher Taskbar) can read it
+      try { await game.settings.set(MODULE_ID, "globalDifficulty", 4); } catch (e) {}
+      // Sync to Cypher System's global roll difficulty setting so new roll dialogs pick it up
+      if (game.settings.settings.has("cyphersystem.rollDifficulty")) {
+        await game.settings.set("cyphersystem", "rollDifficulty", 4);
+      }
       this._updateDifficultyBox();
       this._refreshPortraits();
       this._updateOpenRollDialogs();
@@ -7396,6 +8785,12 @@ ${paths}  </svg>
         val = Math.max(0, Math.min(15, val));
         this._globalDifficulty = val;
         await this._ss("globalDifficulty", val);
+        // Also update the direct setting so player-side modules (e.g. Cypher Taskbar) can read it
+        try { await game.settings.set(MODULE_ID, "globalDifficulty", val); } catch (e) {}
+        // Sync to Cypher System's global roll difficulty setting so new roll dialogs pick it up
+        if (game.settings.settings.has("cyphersystem.rollDifficulty")) {
+          await game.settings.set("cyphersystem", "rollDifficulty", val);
+        }
         this._updateDifficultyBox();
         this._refreshPortraits();
         this._updateOpenRollDialogs();
@@ -7410,6 +8805,11 @@ ${paths}  </svg>
         document.getElementById("ginzzzu-portrait-layer")?.classList.remove("cgm-portraits-hidden");
       }
       this.render();
+    });
+
+    // GM Menu button
+    this.element.querySelector('[data-action="openGMMenu"]')?.addEventListener("click", (e) => {
+      this._showGMMenu(e.currentTarget);
     });
 
     // GM Group Roll button
@@ -7452,6 +8852,23 @@ ${paths}  </svg>
         window.cypherItemsCanvas = new ItemsCanvas();
       }
       window.cypherItemsCanvas.toggle();
+    });
+
+    // Cypher Connections button
+    this.element.querySelector('[data-action="openConnections"]')?.addEventListener("click", async () => {
+      if (!window.CypherConnections) {
+        ui.notifications.warn("Cypher Connections is not loaded.");
+        return;
+      }
+      // Check if any Connections panel is already open
+      const existingPanel = document.querySelector(".cc-panel");
+      if (existingPanel) {
+        // Find the close button and click it
+        const closeBtn = existingPanel.querySelector(".cc-panel-close");
+        if (closeBtn) closeBtn.click();
+        return;
+      }
+      await window.CypherConnections.openBoard();
     });
 
     // Quick Scene button
@@ -8741,6 +10158,7 @@ ${paths}  </svg>
       ? valuables.map(i => `
         <div class="cgm-cash-valuable-item" data-cash-valuable="${i.id}" title="${foundry.utils.escapeHTML(i.name)}">
           <img src="${i.img || 'icons/svg/item-bag.svg'}" alt="" draggable="false">
+          <button class="cgm-cash-valuable-remove" data-remove-cash-valuable="${i.id}" title="Remove"><i class="fas fa-xmark"></i></button>
         </div>`).join("")
       : `<div class="cgm-cash-valuables-empty"><i class="fas fa-hand-holding"></i><span>Drop valuable items here</span></div>`;
 
@@ -8811,6 +10229,22 @@ ${paths}  </svg>
         this._showCashValuesPanel(actorId, wrapEl);
       });
     }
+
+    // Remove valuable handlers
+    panel.querySelectorAll("[data-remove-cash-valuable]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const itemId = btn.dataset.removeCashValuable;
+        const item = actor.items.get(itemId);
+        const itemName = item?.name ?? "Item";
+        if (item) await item.delete();
+        const existing = actor.getFlag("cypher-taskbar", "cashValuables") ?? [];
+        await actor.setFlag("cypher-taskbar", "cashValuables", existing.filter(id => id !== itemId));
+        ui.notifications.info(`Removed ${itemName} from carriable values.`);
+        this._hideCashValuesPanel();
+        this._showCashValuesPanel(actorId, wrapEl);
+      });
+    });
   }
 
   async _saveCashMoney(actor, panel) {
@@ -8871,6 +10305,7 @@ ${paths}  </svg>
         <div class="cgm-assets-card" data-assets-item="${i.id}" title="${foundry.utils.escapeHTML(i.name)}">
           <img src="${i.img || 'icons/svg/item-bag.svg'}" alt="">
           <span class="cgm-assets-name">${i.name}</span>
+          <button class="cgm-assets-remove" data-remove-assets-item="${i.id}" title="Remove"><i class="fas fa-xmark"></i></button>
         </div>`).join("")
       : `<div class="cgm-assets-empty"><i class="fas fa-landmark"></i><span>Drop assets here</span></div>`;
 
@@ -8908,6 +10343,22 @@ ${paths}  </svg>
         this._showAssetsPanel(actorId, wrapEl);
       });
     }
+
+    // Remove asset handlers
+    panel.querySelectorAll("[data-remove-assets-item]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const itemId = btn.dataset.removeAssetsItem;
+        const item = actor.items.get(itemId);
+        const itemName = item?.name ?? "Item";
+        if (item) await item.delete();
+        const existing = actor.getFlag("cypher-taskbar", "assetsItems") ?? [];
+        await actor.setFlag("cypher-taskbar", "assetsItems", existing.filter(id => id !== itemId));
+        ui.notifications.info(`Removed ${itemName} from assets.`);
+        this._hideAssetsPanel();
+        this._showAssetsPanel(actorId, wrapEl);
+      });
+    });
   }
 
   _hideAssetsPanel() {
@@ -9522,6 +10973,7 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "compact", { name: "Compact Mode", hint: "Show compact buttons.", scope: "client", config: false, type: Boolean, default: false });
   game.settings.register(MODULE_ID, "notes", { name: "Quick Notes", hint: "GM quick notes storage.", scope: "client", config: false, type: String, default: "" });
   game.settings.register(MODULE_ID, "locked", { name: "Taskbar Locked", hint: "Lock taskbar visible.", scope: "client", config: false, type: Boolean, default: true });
+  game.settings.register(MODULE_ID, "lockActorSheets", { name: "Lock Actor Sheets", hint: "Prevent players from opening their actor sheets.", scope: "world", config: false, type: Boolean, default: false });
   game.settings.register(MODULE_ID, "portraitPosition", { name: "Portrait Position", hint: "Horizontal position of player portraits (left, center, right).", scope: "client", config: false, type: String, default: "left", choices: { left: "Left", center: "Center", right: "Right" } });
   game.settings.register(MODULE_ID, "portraitObjectFit", { name: "Portrait Image Fit", hint: "How portrait images fill their container.", scope: "client", config: false, type: String, default: "cover", choices: { cover: "Cover", contain: "Contain", auto: "Auto", fill: "Fill", "scale-down": "Scale Down" } });
   game.settings.register(MODULE_ID, "portraitNameAbove", { name: "Name Above Bars", hint: "Place actor name above pool bars instead of next to portrait.", scope: "client", config: false, type: Boolean, default: false });
@@ -9575,6 +11027,7 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "enemyCanvasData", { name: "Enemy Canvas Data", hint: "Stores Enemy canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "itemsCanvasData", { name: "Items Canvas Data", hint: "Stores Items canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "menuPositions", { name: "Menu Positions", hint: "Saved positions for draggable radial menus (JSON).", scope: "client", config: false, type: String, default: "{}" });
+  game.settings.register(MODULE_ID, "gmMenuDocs", { name: "GM Menu Documents", hint: "Journal UUIDs stored in GM menu sections (JSON).", scope: "world", config: false, type: String, default: "{\"shared\":[],\"gm\":[],\"notes\":[]}" });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -9586,16 +11039,70 @@ Hooks.once("init", () => {
   registerSettings();
 });
 
+// When Cypher XP is ready, cache API and show the button
+Hooks.on("cypher-xp.ready", (api) => {
+  console.log(`${MODULE_ID} | cypher-xp.ready hook fired`);
+  if (window.cypherGMTaskbar) {
+    window.cypherGMTaskbar._xpApi = api;
+    // Show the XP button by removing hidden class
+    const xpBtn = window.cypherGMTaskbar.element?.querySelector("#cgm-btn-xp");
+    if (xpBtn) {
+      xpBtn.classList.remove("cgm-xp-hidden");
+      console.log(`${MODULE_ID} | XP button shown`);
+    }
+    // Hide floating launcher
+    window.cypherGMTaskbar._hideCypherXpLauncher();
+  }
+});
+
 Hooks.once("ready", () => {
   if (!game.user?.isGM) { console.log(`${MODULE_ID} | User is not GM — taskbar skipped`); return; }
   const disabled = (() => { try { return game.settings.get(MODULE_ID, "disableGMTaskbar"); } catch { return false; } })();
   if (disabled) { console.log(`${MODULE_ID} | GM Taskbar disabled in settings`); return; }
+
+  // Watch for Cypher XP launcher being added to DOM and hide it
+  const xpObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.id === "cypher-xp-player-launcher" || node.id === "cypher-development-track-player-launcher") {
+          node.style.display = "none";
+          node.style.visibility = "hidden";
+          node.style.opacity = "0";
+          node.style.pointerEvents = "none";
+        }
+      }
+    }
+  });
+  xpObserver.observe(document.body, { childList: true, subtree: true });
+
+  // Periodic check to hide launcher (fallback in case observer misses it)
+  setInterval(() => {
+    const ids = ["cypher-xp-player-launcher", "cypher-development-track-player-launcher"];
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (el && el.style.display !== "none") {
+        el.style.display = "none";
+        el.style.visibility = "hidden";
+        el.style.opacity = "0";
+        el.style.pointerEvents = "none";
+      }
+    }
+  }, 2000);
+
   setTimeout(async () => {
     window.cypherGMTaskbar = new GMTaskbar();
     await window.cypherGMTaskbar._migrateSettings();
     window.cypherGMTaskbar.render();
     console.log(`${MODULE_ID} | GM taskbar rendered`);
   }, 500);
+
+  // Listen for Cypher XP player spend requests (to flash the GM button)
+  game.socket.on("module.cypher-taskbar", (payload) => {
+    if (payload?.type === "gmXpSpendRequest" && game.user?.isGM) {
+      window.cypherGMTaskbar?._flashXpButton?.("default");
+    }
+  });
 });
 
 /* File picker button for disconnection sound setting */
@@ -10112,10 +11619,16 @@ Hooks.on("renderRollEngineDialogSheet", (app, html, data) => {
   const actor = fromUuidSync(app.object.actorUuid);
   if (!actor) return;
 
-  // Determine target difficulty: individual actor flag first, then global
-  let difficulty = actor.getFlag("cypher-gm-taskbar", "targetDifficulty");
-  if (difficulty === undefined || difficulty === null) {
-    difficulty = window.cypherGMTaskbar._globalDifficulty;
+  // Determine target difficulty: individual vs global — use the HIGHER of the two
+  const individual = actor.getFlag("cypher-gm-taskbar", "targetDifficulty");
+  const global = window.cypherGMTaskbar._globalDifficulty;
+  let difficulty;
+  if (Number.isFinite(individual) && Number.isFinite(global)) {
+    difficulty = Math.max(individual, global);
+  } else if (Number.isFinite(individual)) {
+    difficulty = individual;
+  } else {
+    difficulty = global;
   }
 
   // Validate
@@ -11129,4 +12642,19 @@ GM Tip: ${s.gmTip.text}${tags(s.gmTip)}`;
 
 // Export for global access
 window.QuickSceneGenerator = QuickSceneGenerator;
+
+/* ─── Lock Actor Sheets enforcement hook ─── */
+Hooks.on("renderActorSheet", (app, html, data) => {
+  if (game.user.isGM) return;
+  if (!game.settings.get("cypher-gm-taskbar", "lockActorSheets")) return;
+  const actor = app.actor || app.document;
+  if (!actor) return;
+  // Only block sheets for actors the player owns
+  if (!actor.isOwner) return;
+  // Hide immediately so the sheet never becomes visible, then close silently
+  const el = html?.[0] || html;
+  if (el?.style) el.style.display = "none";
+  if (el?.classList) el.classList.add("cgm-sheet-blocked");
+  app.close({ force: true });
+});
 

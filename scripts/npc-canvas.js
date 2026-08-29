@@ -506,24 +506,67 @@ class NPCCanvas extends foundry.applications.api.ApplicationV2 {
     this._hideTokenTooltip();
     const name = tokenEl.dataset.name || "Unknown";
     const img = tokenEl.dataset.img || "icons/svg/mystery-man.svg";
+    const actorId = tokenEl.dataset.actorId;
+    const actor = game.actors?.get(actorId);
+
+    // Build tooltip content
+    let infoHtml = "";
+    if (actor) {
+      const level = actor.system?.basic?.level || actor.system?.level || "—";
+      const health = actor.system?.pools?.health?.value ?? actor.system?.health?.value ?? "—";
+      const healthMax = actor.system?.pools?.health?.max ?? actor.system?.health?.max ?? "—";
+      const might = actor.system?.pools?.might?.value ?? "—";
+      const speed = actor.system?.pools?.speed?.value ?? "—";
+      const intellect = actor.system?.pools?.intellect?.value ?? "—";
+      const damage = actor.system?.basic?.damage ?? 0;
+      const type = actor.type === "npc" ? "NPC" : actor.type === "pc" ? "PC" : actor.type;
+
+      infoHtml = `
+        <div class="cgm-tt-header">
+          <img src="${img}" alt="" draggable="false">
+          <div class="cgm-tt-info">
+            <div class="cgm-tt-name">${foundry.utils.escapeHTML(name)}</div>
+            <div class="cgm-tt-meta">
+              <span class="cgm-tt-type">${type.toUpperCase()}</span>
+              <span class="cgm-tt-level">Lvl ${level}</span>
+              ${damage > 0 ? `<span class="cgm-tt-damage">DMG ${damage}</span>` : ""}
+            </div>
+          </div>
+        </div>
+        <div class="cgm-tt-pools">
+          <div class="cgm-tt-pool"><i class="fas fa-heart"></i><span>${health}</span><small>/${healthMax}</small></div>
+          <div class="cgm-tt-pool cgm-tt-pool-might"><i class="fas fa-fist-raised"></i><span>${might}</span></div>
+          <div class="cgm-tt-pool cgm-tt-pool-speed"><i class="fas fa-running"></i><span>${speed}</span></div>
+          <div class="cgm-tt-pool cgm-tt-pool-intellect"><i class="fas fa-brain"></i><span>${intellect}</span></div>
+        </div>
+      `;
+    } else {
+      infoHtml = `
+        <div class="cgm-tt-header">
+          <img src="${img}" alt="" draggable="false">
+          <div class="cgm-tt-info">
+            <div class="cgm-tt-name">${foundry.utils.escapeHTML(name)}</div>
+            <div class="cgm-tt-meta"><span class="cgm-tt-type">NOT IMPORTED</span></div>
+          </div>
+        </div>
+      `;
+    }
 
     const tooltip = document.createElement("div");
     tooltip.className = "cgm-token-tooltip-fancy";
     tooltip.id = "cgm-token-tooltip-active";
-    tooltip.innerHTML = `
-      <img src="${img}" alt="" draggable="false">
-      <span>${foundry.utils.escapeHTML(name)}</span>
-    `;
+    tooltip.innerHTML = infoHtml;
 
     // Append to app element (outside viewport's overflow:hidden)
     const appEl = this.element[0] || this.element;
     appEl.appendChild(tooltip);
 
-    // Position: centered above the token, relative to app
+    // Position: centered above the token, relative to app — clamp to edges
     const appRect = appEl.getBoundingClientRect();
     const tokenRect = tokenEl.getBoundingClientRect();
     const top = tokenRect.top - appRect.top - tooltip.offsetHeight - 12;
-    const left = tokenRect.left - appRect.left + (tokenRect.width / 2) - (tooltip.offsetWidth / 2);
+    let left = tokenRect.left - appRect.left + (tokenRect.width / 2) - (tooltip.offsetWidth / 2);
+    left = Math.max(4, Math.min(left, appRect.width - tooltip.offsetWidth - 4));
 
     tooltip.style.top = `${top}px`;
     tooltip.style.left = `${left}px`;

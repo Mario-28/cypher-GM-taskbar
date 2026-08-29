@@ -380,6 +380,41 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
     return level !== undefined && level !== null ? parseInt(level) : null;
   }
 
+  /**
+   * Get NPC health (current / max) for tooltip display.
+   * Tries common Cypher System health pool locations.
+   */
+  _getNPCHealth(actor) {
+    if (!actor) return null;
+    const sys = actor.system;
+    if (!sys) return null;
+
+    // Try health pool first
+    const hp = sys.pools?.health;
+    if (hp && hp.value !== undefined && hp.max !== undefined) {
+      return { value: parseInt(hp.value) || 0, max: parseInt(hp.max) || 1 };
+    }
+
+    // Try might pool as fallback (common for NPCs)
+    const might = sys.pools?.might;
+    if (might && might.value !== undefined && might.max !== undefined) {
+      return { value: parseInt(might.value) || 0, max: parseInt(might.max) || 1 };
+    }
+
+    // Try basic health
+    const basicHp = sys.basic?.health;
+    if (basicHp && basicHp.value !== undefined && basicHp.max !== undefined) {
+      return { value: parseInt(basicHp.value) || 0, max: parseInt(basicHp.max) || 1 };
+    }
+
+    // Try generic health value
+    if (sys.health?.value !== undefined) {
+      return { value: parseInt(sys.health.value) || 0, max: parseInt(sys.health.max) || 1 };
+    }
+
+    return null;
+  }
+
   /* ================================================================
      EVENT BINDING
      ================================================================ */
@@ -505,15 +540,54 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
 
   _showTokenTooltip(tokenEl) {
     this._hideTokenTooltip();
-    const name = tokenEl.dataset.name || "Unknown";
-    const img = tokenEl.dataset.img || "icons/svg/mystery-man.svg";
+    const actorId = tokenEl.dataset.actorId;
+    const actor = game.actors?.get(actorId);
+    const name = tokenEl.dataset.name || actor?.name || "Unknown";
+    const img = tokenEl.dataset.img || actor?.img || "icons/svg/mystery-man.svg";
+    const level = this._getNPCLevel(actor);
+    const hp = this._getNPCHealth(actor);
 
     const tooltip = document.createElement("div");
     tooltip.className = "cgm-token-tooltip-fancy";
     tooltip.id = "cgm-token-tooltip-active";
+
+    // Build level HTML
+    let levelHTML = "";
+    if (level !== null && level !== undefined) {
+      let levelColor = "#40b060";
+      if (level <= 5) levelColor = "#40b060";
+      else if (level <= 7) levelColor = "#e8c840";
+      else if (level <= 10) levelColor = "#d94040";
+      else levelColor = "#a040d0";
+      levelHTML = `<div class="cgm-tt-level" style="color:${levelColor}"><span class="cgm-tt-label">LEVEL</span><span class="cgm-tt-value">${level}</span></div>`;
+    }
+
+    // Build HP HTML
+    let hpHTML = "";
+    if (hp !== null && hp !== undefined) {
+      const hpPct = hp.max > 0 ? Math.round((hp.value / hp.max) * 100) : 0;
+      let hpColor = "#40b060";
+      if (hpPct <= 25) hpColor = "#d94040";
+      else if (hpPct <= 50) hpColor = "#e8c840";
+      hpHTML = `
+        <div class="cgm-tt-hp">
+          <span class="cgm-tt-label">HP</span>
+          <div class="cgm-tt-hp-bar">
+            <div class="cgm-tt-hp-fill" style="width:${hpPct}%;background:${hpColor};"></div>
+          </div>
+          <span class="cgm-tt-hp-text">${hp.value}/${hp.max}</span>
+        </div>`;
+    }
+
     tooltip.innerHTML = `
-      <img src="${img}" alt="" draggable="false">
-      <span>${foundry.utils.escapeHTML(name)}</span>
+      <div class="cgm-tt-header">
+        <img src="${img}" alt="" draggable="false">
+        <div class="cgm-tt-info">
+          <span class="cgm-tt-name">${foundry.utils.escapeHTML(name)}</span>
+          ${levelHTML}
+        </div>
+      </div>
+      ${hpHTML}
     `;
 
     // Append to app element (outside viewport's overflow:hidden)
