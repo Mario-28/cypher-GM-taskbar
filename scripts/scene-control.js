@@ -484,9 +484,9 @@ class SceneControl extends foundry.applications.api.ApplicationV2 {
         if (this._locked) return;
         // Ignore clicks inside the Scene Control window
         if (appEl.contains(e.target)) return;
-        // Ignore clicks on context menus or dialogs
+        // Ignore clicks on context menus or dialogs (V12 legacy + V13+ ApplicationV2)
         if (e.target.closest('.cgm-fancy-ctx-menu')) return;
-        if (e.target.closest('.dialog') || e.target.closest('.window-app')) return;
+        if (e.target.closest('.dialog, .window-app, .application, .file-picker')) return;
         this.close();
       };
       // Use capture phase to catch clicks before they bubble
@@ -707,7 +707,7 @@ class SceneControl extends foundry.applications.api.ApplicationV2 {
       }
     });
 
-    const closeMenu = (e) => { if (e && menu.contains(e.target)) return; this._closeContextMenu(); document.removeEventListener("click", closeMenu); document.removeEventListener("keydown", escHandler); };
+    const closeMenu = (e) => { if (e && (menu.contains(e.target) || e.target.closest('.dialog, .window-app, .application, .file-picker'))) return; this._closeContextMenu(); document.removeEventListener("click", closeMenu); document.removeEventListener("keydown", escHandler); };
     const escHandler = (e) => { if (e.key === "Escape") closeMenu(); };
     setTimeout(() => { document.addEventListener("click", closeMenu); document.addEventListener("keydown", escHandler); }, 50);
 
@@ -862,7 +862,7 @@ class SceneControl extends foundry.applications.api.ApplicationV2 {
       }
     });
 
-    const close = () => { menu.remove(); document.removeEventListener("click", close); document.removeEventListener("keydown", esc); };
+    const close = (e) => { if (e && (menu.contains(e.target) || e.target.closest('.dialog, .window-app, .application, .file-picker'))) return; menu.remove(); document.removeEventListener("click", close); document.removeEventListener("keydown", esc); };
     const esc = (e) => { if (e.key === "Escape") close(); };
     setTimeout(() => { document.addEventListener("click", close); document.addEventListener("keydown", esc); }, 50);
 

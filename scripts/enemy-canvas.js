@@ -657,7 +657,7 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
       }
     });
 
-    const close = () => { menu.remove(); document.removeEventListener("click", close); document.removeEventListener("keydown", esc); };
+    const close = (e) => { if (e && (menu.contains(e.target) || e.target.closest('.dialog, .window-app, .application, .file-picker'))) return; menu.remove(); document.removeEventListener("click", close); document.removeEventListener("keydown", esc); };
     const esc = (e) => { if (e.key === "Escape") close(); };
     setTimeout(() => { document.addEventListener("click", close); document.addEventListener("keydown", esc); }, 50);
 
@@ -1470,7 +1470,7 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
     });
 
     const closeMenu = (e) => {
-      if (e && menu.contains(e.target)) return;
+      if (e && (menu.contains(e.target) || e.target.closest('.dialog, .window-app, .application, .file-picker'))) return;
       this._closeContextMenu();
       document.removeEventListener("click", closeMenu);
       document.removeEventListener("keydown", escHandler);

@@ -119,6 +119,10 @@ class GMTaskbar {
     this._subMenuPositions = {};
     this._lastDifficulty = 0;
     this._dynamicButtons = []; // Discovered injected buttons from other modules
+    // Party data cache (optimization: avoid rebuilding data multiple times per frame)
+    this._partyDataCache = null;
+    this._partyDataCacheTime = 0;
+    this._partyDataCacheTTL = 300; // ms
     this._loadSettings();
     this._loadPanelPositions();
   }
@@ -1085,6 +1089,117 @@ class GMTaskbar {
     }, 4000);
   }
 
+  /* ─── XP Spend Approval (GM side) ─── */
+  async _doXpSpend(actor, spendType, label) {
+    let api = this._getXpApi();
+    for (let i = 0; i < 50 && !api; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      api = this._getXpApi();
+    }
+    if (!api) {
+      ui.notifications.warn("Cypher XP API is not ready yet. Please try again.");
+      return;
+    }
+    try {
+      await api.logSpend(actor, {
+        spendType,
+        amount: 1,
+        note: label
+      });
+      ui.notifications.info(`Spent 1 XP on ${label}.`);
+    } catch (err) {
+      console.error(`${MODULE_ID} | XP spend failed:`, err);
+      ui.notifications.error("Failed to spend XP.");
+    }
+  }
+
+  async _openGMXpSpendRequest(payload) {
+    if (!game.user?.isGM) return;
+
+    // Try world actor first, then token actor
+    let actor = game.actors?.get(payload.actorId);
+    if (!actor) {
+      const token = canvas?.tokens?.placeables?.find(t => t.actor?.id === payload.actorId);
+      actor = token?.actor;
+    }
+
+    const spendIcons = {
+      reroll: "fa-dice",
+      "player-intrusion": "fa-hand-sparkles",
+      insight: "fa-lightbulb",
+      "temporary-benefit": "fa-clock",
+      other: "fa-circle"
+    };
+    const iconClass = spendIcons[payload.spendType] || "fa-star";
+
+    const result = await new Promise((resolve) => {
+      new Dialog({
+        title: "XP Spend Request",
+        content: `
+          <div style="padding:16px;text-align:center;">
+            <div style="font-size:2em;color:#ffd700;margin-bottom:8px;"><i class="fas ${iconClass}"></i></div>
+            <div style="font-size:1.1em;font-weight:700;margin-bottom:4px;">${foundry.utils.escapeHTML(payload.userName)} wants to spend XP</div>
+            <div style="color:#c8a96e;margin-bottom:2px;">Character: <strong>${foundry.utils.escapeHTML(payload.actorName)}</strong></div>
+            <div style="color:#f0d68a;margin-bottom:2px;">Action: <strong>${foundry.utils.escapeHTML(payload.label)}</strong></div>
+            <div style="color:#ffd700;margin-bottom:8px;">Cost: <strong>${payload.xpCost} XP</strong></div>
+            <div style="font-size:0.85em;color:#7a7a7a;">Approve to deduct XP and log the spend.</div>
+          </div>`,
+        buttons: {
+          approve: {
+            icon: '<i class="fas fa-check"></i>',
+            label: "Allow",
+            callback: () => resolve("approve")
+          },
+          deny: {
+            icon: '<i class="fas fa-times"></i>',
+            label: "Deny",
+            callback: () => resolve("deny")
+          }
+        },
+        default: "approve"
+      }).render(true);
+    });
+
+    if (result === "approve") {
+      if (!actor) {
+        ui.notifications.warn(`Cannot approve XP spend: actor "${payload.actorName}" not found.`);
+        // Still notify player of failure
+        game.socket.emit("module.cypher-taskbar", {
+          type: "xpSpendDenied",
+          requestId: payload.requestId,
+          targetUserId: payload.userId,
+          actorName: payload.actorName,
+          label: payload.label,
+          spendType: payload.spendType
+        });
+        return;
+      }
+      await this._doXpSpend(actor, payload.spendType, payload.label);
+      // Notify player
+      const approvalPayload = {
+        type: "xpSpendApproved",
+        requestId: payload.requestId,
+        targetUserId: payload.userId,
+        actorName: payload.actorName,
+        label: payload.label,
+        spendType: payload.spendType
+      };
+      if (payload.rollData) approvalPayload.rollData = payload.rollData;
+      console.log(`[CGM] Sending xpSpendApproved:`, approvalPayload);
+      game.socket.emit("module.cypher-taskbar", approvalPayload);
+    } else {
+      // Notify player of denial
+      game.socket.emit("module.cypher-taskbar", {
+        type: "xpSpendDenied",
+        requestId: payload.requestId,
+        targetUserId: payload.userId,
+        actorName: payload.actorName,
+        label: payload.label,
+        spendType: payload.spendType
+      });
+    }
+  }
+
   /* Load saved panel positions from synced settings (with localStorage fallback for migration) */
   _loadPanelPositions() {
     try {
@@ -1299,6 +1414,11 @@ class GMTaskbar {
     if (this._trayInterval) clearInterval(this._trayInterval);
     if (this._xpCountInterval) clearInterval(this._xpCountInterval);
     if (this._xpButtonStatusInterval) clearInterval(this._xpButtonStatusInterval);
+    if (this._tooltipTimer) clearTimeout(this._tooltipTimer);
+    if (this._effectTooltipTimer) clearTimeout(this._effectTooltipTimer);
+    // Clear party data cache on full re-render
+    this._partyDataCache = null;
+    this._partyDataCacheTime = 0;
 
     const bar = document.createElement("div");
     bar.id = `${MODULE_ID}-bar`;
@@ -1342,14 +1462,7 @@ class GMTaskbar {
       this._discoverDynamicButtons();
       this._correctDynamicButtonPositions();
       this._restoreButtonOrder();
-    }, 0);
-
-    // Phase 3: Fallback for late injectors
-    setTimeout(() => {
-      this._discoverDynamicButtons();
-      this._correctDynamicButtonPositions();
-      this._restoreButtonOrder();
-    }, 500);
+    }, 100);
 
     if (this.activePanel) this._openPanel(this.activePanel);
   }
@@ -2232,7 +2345,7 @@ ${paths}  </svg>
       for (const p of panels) {
         if (p.contains(e.target)) return;
       }
-      if (!menu.contains(e.target)) {
+      if (!menu.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideRadialMenu();
         document.removeEventListener("click", closeHandler);
       }
@@ -2521,7 +2634,7 @@ ${paths}  </svg>
 
     // Close on outside click
     const closeOnOutside = (e) => {
-      if (!menu.contains(e.target) && !btnEl.contains(e.target)) {
+      if (!menu.contains(e.target) && !btnEl.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideGMMenu();
         document.removeEventListener("click", closeOnOutside);
       }
@@ -2860,12 +2973,12 @@ ${paths}  </svg>
     // Make draggable
     this._cleanupRecoveryDrag = this._makeMenuDraggable(menu, "recoveryTaskbar");
 
-    const onSegClick = (e) => {
+    const onSegClick = async (e) => {
       e.stopPropagation();
       const action = e.currentTarget.dataset.action;
       this._hideRecoveryTaskbarMenu();
-      if (action === "oneRecovery") this._doOneRecoveryAll();
-      else if (action === "fullRecovery") this._doFullRecoveryAll();
+      if (action === "oneRecovery") await this._doOneRecoveryAll();
+      else if (action === "fullRecovery") await this._doFullRecoveryAll();
     };
     menu.querySelectorAll(".cgm-pie-seg, .cgm-pie-label").forEach(el => {
       el.addEventListener("click", onSegClick);
@@ -3716,7 +3829,7 @@ ${paths}  </svg>
     }
 
     if (recoveredCount > 0) {
-      ChatMessage.create({
+      await ChatMessage.create({
         speaker: { alias: "GM Recovery" },
         content: `<div style="padding:8px 12px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:6px;">
           <strong style="color:#3b82f6;">💧 ONE Recovery Applied</strong><br>
@@ -3765,7 +3878,7 @@ ${paths}  </svg>
       recoveredCount++;
     }
 
-    ChatMessage.create({
+    await ChatMessage.create({
       speaker: { alias: "GM Recovery" },
       content: `<div style="padding:8px 12px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:6px;">
         <strong style="color:#3b82f6;">💧 FULL Rest Applied</strong><br>
@@ -4013,7 +4126,7 @@ ${paths}  </svg>
     });
 
     const closeHandler = (e) => {
-      if (!menu.contains(e.target) && !this._gmGroupRollMenuEl?.contains(e.target) && e.target !== btnEl) {
+      if (!menu.contains(e.target) && !this._gmGroupRollMenuEl?.contains(e.target) && e.target !== btnEl && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this[`_hideGMGroupRoll${type.charAt(0).toUpperCase() + type.slice(1)}`]();
         this._hideGMGroupRollMenu(); // Close main menu too
         document.removeEventListener("click", closeHandler);
@@ -4362,7 +4475,7 @@ ${paths}  </svg>
 
     // Click outside to close
     const closeHandler = (e) => {
-      if (!subMenu.contains(e.target) && !this._connectingLineEl?.contains(e.target)) {
+      if (!subMenu.contains(e.target) && !this._connectingLineEl?.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hidePoolsMenu();
         document.removeEventListener("click", closeHandler);
       }
@@ -4589,7 +4702,7 @@ ${paths}  </svg>
 
     // Click outside to close
     const closeHandler = (e) => {
-      if (!lineContainer.contains(e.target) && !subMenu.contains(e.target)) {
+      if (!lineContainer.contains(e.target) && !subMenu.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideStatusMenu();
         this._hideRadialMenu();
         document.removeEventListener("click", closeHandler);
@@ -4703,7 +4816,7 @@ ${paths}  </svg>
 
     // Click outside to close
     const closeHandler = (e) => {
-      if (!healthMenu.contains(e.target) && !this._connectingLineEl?.contains(e.target)) {
+      if (!healthMenu.contains(e.target) && !this._connectingLineEl?.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideStatusMenu();
         this._hideRadialMenu();
         document.removeEventListener("click", closeHandler);
@@ -4863,7 +4976,7 @@ ${paths}  </svg>
 
     // Outside click to close
     const closeHandler = (e) => {
-      if (!panel.contains(e.target)) {
+      if (!panel.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideDfredsEffectsPicker();
         document.removeEventListener("click", closeHandler);
       }
@@ -5377,7 +5490,7 @@ ${paths}  </svg>
 
     setTimeout(() => {
       this._skillListOutsideClick = (e) => {
-        if (!panel.contains(e.target)) this._hideCallForRollSkillSubMenu();
+        if (!panel.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) this._hideCallForRollSkillSubMenu();
       };
       document.addEventListener("click", this._skillListOutsideClick);
     }, 50);
@@ -5479,7 +5592,7 @@ ${paths}  </svg>
 
     setTimeout(() => {
       this._freqListOutsideClick = (e) => {
-        if (!panel.contains(e.target)) this._hideCallForRollFrequentSubMenu();
+        if (!panel.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) this._hideCallForRollFrequentSubMenu();
       };
       document.addEventListener("click", this._freqListOutsideClick);
     }, 50);
@@ -5655,7 +5768,7 @@ ${paths}  </svg>
     }
     await actor.update(updateData);
 
-    ChatMessage.create({
+    await ChatMessage.create({
       speaker: { actor: actor.id, alias: actor.name },
       content: `<div style="padding:8px 12px;background:rgba(64,192,96,0.1);border:1px solid rgba(64,192,96,0.3);border-radius:6px;">
         <strong style="color:#40c060;">💚 ${actor.name} — Full Rest</strong><br>
@@ -5761,7 +5874,7 @@ ${paths}  </svg>
 
     await actor.update(updateData);
 
-    ChatMessage.create({
+    await ChatMessage.create({
       speaker: { actor: actor.id, alias: actor.name },
       content: `<div style="padding:8px 12px;background:rgba(200,169,110,0.1);border:1px solid rgba(200,169,110,0.3);border-radius:6px;">
         <strong style="color:#c8a96e;">⚡ ${actor.name} — Interrupted Rest</strong><br>
@@ -5956,7 +6069,7 @@ ${paths}  </svg>
     if (actor.sheet) actor.sheet.render(true);
 
     const statusLabels = { healthy: "Healthy", impaired: "Impaired", debilitated: "Debilitated", dead: "Dead" };
-    ChatMessage.create({
+    await ChatMessage.create({
       speaker: { alias: actor.name, actor: actor.id },
       content: `<div style="padding:4px 0;"><strong>${actor.name}</strong> is now <strong style="color:#ffcc44;">${statusLabels[statusKey]}</strong>.</div>`,
       whisper: game.users.filter(u => u.isGM).map(u => u.id)
@@ -6628,10 +6741,10 @@ ${paths}  </svg>
       }
     });
 
-    panel.querySelector(".cgm-target-chat-btn")?.addEventListener("click", () => {
+    panel.querySelector(".cgm-target-chat-btn")?.addEventListener("click", async () => {
       const d = parseInt(slider.value, 10);
       const data = difficultyData[d];
-      ChatMessage.create({
+      await ChatMessage.create({
         speaker: { alias: "GM" },
         content: `<div style="padding:6px 10px;background:rgba(245,166,35,0.1);border:1px solid rgba(245,166,35,0.3);border-radius:6px;">
           <strong style="color:#f5a623;">🎯 GM sets difficulty: ${d}</strong><br>
@@ -6648,7 +6761,7 @@ ${paths}  </svg>
 
     // Click outside to close
     const closeHandler = (e) => {
-      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target)) {
+      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideTargetPanel();
         document.removeEventListener("click", closeHandler);
       }
@@ -6872,7 +6985,7 @@ ${paths}  </svg>
     });
 
     const closeHandler = (e) => {
-      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target)) {
+      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideDamagePanel();
         document.removeEventListener("click", closeHandler);
       }
@@ -7200,7 +7313,7 @@ ${paths}  </svg>
     });
 
     const closeHandler = (e) => {
-      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target)) {
+      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideRecoveryPanel();
         document.removeEventListener("click", closeHandler);
       }
@@ -7384,7 +7497,7 @@ ${paths}  </svg>
         const item = allItems[idx];
         if (!item || item.type !== "cypher") return;
         // Send to chat that cypher was used
-        ChatMessage.create({
+        await ChatMessage.create({
           speaker: { actor: actorId, alias: actor.name },
           content: `<div style="padding:6px 10px;background:rgba(136,85,204,0.1);border:1px solid rgba(136,85,204,0.3);border-radius:6px;">
             <strong style="color:#aa77dd;">🧪 ${actor.name} uses ${item.name}</strong><br>
@@ -7404,7 +7517,7 @@ ${paths}  </svg>
     });
 
     const closeHandler = (e) => {
-      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target)) {
+      if (!panel.contains(e.target) && !this._connectingLineEl?.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideCyphersPanel();
         document.removeEventListener("click", closeHandler);
       }
@@ -7460,7 +7573,7 @@ ${paths}  </svg>
 
   /* ─── Chat Message Helper ─── */
 
-  _sendIntrusionChatMessage(actor, accepted, gaveXPTo = null) {
+  async _sendIntrusionChatMessage(actor, accepted, gaveXPTo = null) {
     const actorImg = actor?.img || "icons/svg/mystery-man.svg";
     const actorName = actor?.name || "Unknown";
     const acceptedColor = accepted ? "var(--cgm-success)" : "var(--cgm-danger)";
@@ -7498,7 +7611,7 @@ ${paths}  </svg>
       </div>
     `;
 
-    ChatMessage.create({
+    await ChatMessage.create({
       speaker: { alias: "GM Intrusion", actor: actor?.id },
       content,
       whisper: game.users.filter(u => u.isGM).map(u => u.id)
@@ -8070,8 +8183,12 @@ ${paths}  </svg>
 
   /* ─── Data ─── */
 
-  _getPartyData() {
-    return game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).map(actor => {
+  _getPartyData(force = false) {
+    // Cache check: return cached data if still fresh
+    if (!force && this._partyDataCache && (Date.now() - this._partyDataCacheTime) < this._partyDataCacheTTL) {
+      return this._partyDataCache;
+    }
+    const result = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner).map(actor => {
       const sys = actor.system ?? {};
       const pools = sys.pools ?? sys.basic ?? {};
       const might = pools.might ?? {};
@@ -8147,6 +8264,10 @@ ${paths}  </svg>
         activeEffects
       };
     });
+    // Cache result
+    this._partyDataCache = result;
+    this._partyDataCacheTime = Date.now();
+    return result;
   }
 
   /* ─── Panel Builders ─── */
@@ -8695,7 +8816,7 @@ ${paths}  </svg>
       });
       // Close menu when clicking outside
       document.addEventListener("click", (e) => {
-        if (!eyeMenu.contains(e.target) && e.target !== eyeBtn && !eyeBtn.contains(e.target)) {
+        if (!eyeMenu.contains(e.target) && e.target !== eyeBtn && !eyeBtn.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
           eyeMenu.classList.remove('cgm-eye-menu-visible');
         }
       });
@@ -10074,7 +10195,7 @@ ${paths}  </svg>
       await item.update({ "system.quantity": qty });
     }
   }
-  _showCashValuesPanel(actorId, wrapEl) {
+  async _showCashValuesPanel(actorId, wrapEl) {
     const actor = game.actors.get(actorId);
     if (!actor) return;
     const name = actor.name;
@@ -10106,7 +10227,7 @@ ${paths}  </svg>
     // Clean up missing items
     if (valuables.length !== valuableIds.length) {
       const validIds = valuables.map(i => i.id);
-      actor.setFlag("cypher-taskbar", "cashValuables", validIds);
+      await actor.setFlag("cypher-taskbar", "cashValuables", validIds);
     }
 
     const panelW = 300;
@@ -10278,7 +10399,7 @@ ${paths}  </svg>
   }
 
   /* ─── Assets Panel ─── */
-  _showAssetsPanel(actorId, wrapEl) {
+  async _showAssetsPanel(actorId, wrapEl) {
     const actor = game.actors.get(actorId);
     if (!actor) return;
     const name = actor.name;
@@ -10291,7 +10412,7 @@ ${paths}  </svg>
 
     if (assets.length !== assetIds.length) {
       const validIds = assets.map(i => i.id);
-      actor.setFlag("cypher-taskbar", "assetsItems", validIds);
+      await actor.setFlag("cypher-taskbar", "assetsItems", validIds);
     }
 
     const panelW = 280;
@@ -11097,10 +11218,14 @@ Hooks.once("ready", () => {
     console.log(`${MODULE_ID} | GM taskbar rendered`);
   }, 500);
 
-  // Listen for Cypher XP player spend requests (to flash the GM button)
+  // Listen for Cypher XP player spend requests
   game.socket.on("module.cypher-taskbar", (payload) => {
+    console.log(`[CGM] Socket received:`, payload);
     if (payload?.type === "gmXpSpendRequest" && game.user?.isGM) {
-      window.cypherGMTaskbar?._flashXpButton?.("default");
+      console.log(`[CGM] Handling gmXpSpendRequest for actor:`, payload.actorName);
+      window.cypherGMTaskbar?._openGMXpSpendRequest?.(payload);
+    } else {
+      console.log(`[CGM] Ignoring socket message. type=${payload?.type}, isGM=${game.user?.isGM}`);
     }
   });
 });
@@ -11416,7 +11541,7 @@ Hooks.on("ready", () => {
           return false;
         }
       }
-      function _sendIntrusionChat(a, accepted, gaveXPTo = null) {
+      async function _sendIntrusionChat(a, accepted, gaveXPTo = null) {
         const actorImg = a?.img || "icons/svg/mystery-man.svg";
         const actorName = a?.name || "Unknown";
         const acceptedColor = accepted ? "#40b060" : "#ff7070";
@@ -11428,7 +11553,7 @@ Hooks.on("ready", () => {
         const giveXPResult = gaveXPTo
           ? `<div style="margin-top:4px; color:#40b060; font-size:12px;"><i class="fas fa-gift" style="margin-right:4px;"></i> +1 XP given to <strong>${gaveXPTo.name}</strong></div>`
           : "";
-        ChatMessage.create({
+        await ChatMessage.create({
           speaker: { actor: a.id, alias: actorName },
           content: `
             <div style="display:flex; align-items:flex-start; gap:10px; padding:4px 0;">
@@ -11548,11 +11673,15 @@ Hooks.on("updateActor", (actor, data, options, userId) => {
   if (!game.user?.isGM) return;
   if (actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  // Invalidate party data cache so next read gets fresh data
+  if (window.cypherGMTaskbar._partyDataCache) {
+    window.cypherGMTaskbar._partyDataCache = null;
+  }
   // Debounce: wait for all updates to settle
   clearTimeout(window._cgmRefreshTimer);
   window._cgmRefreshTimer = setTimeout(() => {
     window.cypherGMTaskbar._refreshPortraits();
-  }, 100);
+  }, 250);
 });
 
 /* Refresh portraits when items change on actors (cyphers, artifacts) */
@@ -11561,10 +11690,13 @@ Hooks.on("createItem", (item, options, userId) => {
   const actor = item.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  if (window.cypherGMTaskbar._partyDataCache) {
+    window.cypherGMTaskbar._partyDataCache = null;
+  }
   clearTimeout(window._cgmRefreshTimer);
   window._cgmRefreshTimer = setTimeout(() => {
     window.cypherGMTaskbar._refreshPortraits();
-  }, 100);
+  }, 250);
 });
 
 Hooks.on("deleteItem", (item, options, userId) => {
@@ -11572,10 +11704,13 @@ Hooks.on("deleteItem", (item, options, userId) => {
   const actor = item.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  if (window.cypherGMTaskbar._partyDataCache) {
+    window.cypherGMTaskbar._partyDataCache = null;
+  }
   clearTimeout(window._cgmRefreshTimer);
   window._cgmRefreshTimer = setTimeout(() => {
     window.cypherGMTaskbar._refreshPortraits();
-  }, 100);
+  }, 250);
 });
 
 /* Refresh portraits when active effects are created/deleted/updated */
@@ -11584,10 +11719,13 @@ Hooks.on("createActiveEffect", (effect, options, userId) => {
   const actor = effect.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  if (window.cypherGMTaskbar._partyDataCache) {
+    window.cypherGMTaskbar._partyDataCache = null;
+  }
   clearTimeout(window._cgmRefreshTimer);
   window._cgmRefreshTimer = setTimeout(() => {
     window.cypherGMTaskbar._refreshPortraits();
-  }, 50);
+  }, 250);
 });
 
 Hooks.on("deleteActiveEffect", (effect, options, userId) => {
@@ -11595,10 +11733,13 @@ Hooks.on("deleteActiveEffect", (effect, options, userId) => {
   const actor = effect.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  if (window.cypherGMTaskbar._partyDataCache) {
+    window.cypherGMTaskbar._partyDataCache = null;
+  }
   clearTimeout(window._cgmRefreshTimer);
   window._cgmRefreshTimer = setTimeout(() => {
     window.cypherGMTaskbar._refreshPortraits();
-  }, 50);
+  }, 250);
 });
 
 Hooks.on("updateActiveEffect", (effect, data, options, userId) => {
@@ -11606,10 +11747,13 @@ Hooks.on("updateActiveEffect", (effect, data, options, userId) => {
   const actor = effect.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  if (window.cypherGMTaskbar._partyDataCache) {
+    window.cypherGMTaskbar._partyDataCache = null;
+  }
   clearTimeout(window._cgmRefreshTimer);
   window._cgmRefreshTimer = setTimeout(() => {
     window.cypherGMTaskbar._refreshPortraits();
-  }, 50);
+  }, 250);
 });
 
 /* ── Apply GM Taskbar difficulty to Cypher System roll dialogs ── */
@@ -12646,7 +12790,9 @@ window.QuickSceneGenerator = QuickSceneGenerator;
 /* ─── Lock Actor Sheets enforcement hook ─── */
 Hooks.on("renderActorSheet", (app, html, data) => {
   if (game.user.isGM) return;
-  if (!game.settings.get("cypher-gm-taskbar", "lockActorSheets")) return;
+  try {
+    if (!game.settings.get("cypher-gm-taskbar", "lockActorSheets")) return;
+  } catch { return; }
   const actor = app.actor || app.document;
   if (!actor) return;
   // Only block sheets for actors the player owns

@@ -161,7 +161,7 @@ class GroupStatusesMenu {
                         this._attributeEl?.contains(e.target) ||
                         this._healthEl?.contains(e.target) ||
                         this._confirmEl?.contains(e.target);
-      if (!menu.contains(e.target) && e.target !== btnEl && !inSubmenu) {
+      if (!menu.contains(e.target) && e.target !== btnEl && !inSubmenu && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this.hide();
         document.removeEventListener("click", closeHandler);
       }
@@ -322,7 +322,7 @@ class GroupStatusesMenu {
 
     // Outside click
     const closeHandler = (e) => {
-      if (!panel.contains(e.target) && !this._menuEl?.contains(e.target)) {
+      if (!panel.contains(e.target) && !this._menuEl?.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideEffectsMenu();
         document.removeEventListener("click", closeHandler);
       }
@@ -562,7 +562,7 @@ class GroupStatusesMenu {
 
     // Outside click
     const closeHandler = (e) => {
-      if (!dlg.contains(e.target)) {
+      if (!dlg.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideConfirm();
         document.removeEventListener("click", closeHandler);
       }
@@ -852,7 +852,7 @@ class GroupStatusesMenu {
 
     // Outside click
     const closeHandler = (e) => {
-      if (!dlg.contains(e.target)) {
+      if (!dlg.contains(e.target) && !e.target.closest('.dialog, .window-app, .application, .file-picker')) {
         this._hideConfirm();
         this._pending = null;
         document.removeEventListener("click", closeHandler);
