@@ -1,5 +1,5 @@
 /**
- * Cypher GM Taskbar v4.5.104
+ * Cypher GM Taskbar v4.5.144
  * Foundry VTT v13+ | Cypher System
  *
  * GM-only taskbar with combat tracker, intrusions, cyphers, recovery,
@@ -98,10 +98,16 @@ class GMTaskbar {
     this._gmGroupRollAttributesEl = null;
     this._gmGroupRollSkillsEl = null;
     this._gmGroupRollFreeEl = null;
+    this._gmTasksData = []; // aggregated GM tasks from all player actors
+    this._gmTasksPanelEl = null;
+    this._gmTasksDetailEl = null;
     this._gmGroupRollDefenseEl = null;
     this._recoveryTaskbarMenuEl = null;
     this._reputationPanelEl = null;
     this._reputationPanelPos = null;
+    this._randomPanelEl = null;
+    this._randomPanelPos = null;
+    this._randomPanelUnlocked = false;
     this._groupStatuses = new GroupStatusesMenu(this);
     // Cypher XP integration
     this._xpApi = null;
@@ -227,11 +233,7 @@ class GMTaskbar {
   _refreshHistoryView() {
     const appEl = document.getElementById("cypher-xp-gm-dashboard");
     if (!appEl) return;
-    const historyPanel = appEl.querySelector(".cgm-xp-history-panel");
-    if (historyPanel && historyPanel.style.display !== "none") {
-      this._renderXpHistoryPanel(historyPanel);
-    }
-    // Also update header undo/redo states if header exists
+    // Update header undo/redo states if header exists
     const header = appEl.querySelector(".cgm-xp-dashboard-header");
     if (header) this._updateUndoRedoState(header);
   }
@@ -504,8 +506,410 @@ class GMTaskbar {
     this._injectXpRequestActorIcons(appEl);
     this._watchXpRequestsTab(appEl);
 
-    // Inject History tab into the dashboard
-    this._injectXpHistoryTab(appEl);
+  }
+
+  /** Open Portraits menu — manage custom portraits for all active actors */
+  async _openPortraitsMenu() {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner && a.testUserPermission(game.user, "OWNER"));
+    if (!actors.length) {
+      return ui.notifications.warn("Cypher GM Taskbar: no player-owned PCs found.");
+    }
+
+    // Sort by name
+    actors.sort((a, b) => a.name.localeCompare(b.name));
+
+    // Build tabs and panes
+    let tabsHtml = "";
+    let panesHtml = "";
+
+    for (let i = 0; i < actors.length; i++) {
+      const actor = actors[i];
+      const isActive = i === 0 ? " is-active" : "";
+      const prefs = actor.getFlag("cypher-taskbar", "taskbarPrefs") ?? {};
+      const customPortraitEnabled = prefs.customPortraitEnabled ?? false;
+      const customPortraitImage = prefs.customPortraitImage ?? "";
+      const portraitFilesEnabled = prefs.portraitFilesEnabled ?? false;
+      const portraitFiles = prefs.portraitFiles ?? [];
+      const portraitAnimFrequency = prefs.portraitAnimFrequency ?? 0;
+      const portraitAnimLoops = prefs.portraitAnimLoops ?? 0;
+      const isVideo = this._isPortraitVideoPath(customPortraitImage);
+
+      // Build file list HTML
+      const fileListHtml = portraitFiles.length
+        ? portraitFiles.map((f, idx) => `
+            <div class="cgm-portraits-file-item" data-file-idx="${idx}">
+              <span class="cgm-portraits-file-name" title="${foundry.utils.escapeHTML(f)}">${foundry.utils.escapeHTML(f.split('/').pop())}</span>
+              <button type="button" class="cgm-portraits-file-remove" data-remove-file="${idx}" title="Remove"><i class="fas fa-times"></i></button>
+            </div>
+          `).join("")
+        : `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
+
+      tabsHtml += `
+        <button class="cgm-portraits-tab${isActive}" data-actor-id="${actor.id}" type="button">
+          <img src="${actor.img || "icons/svg/mystery-man.svg"}" alt="${actor.name}">
+          <span>${actor.name}</span>
+        </button>
+      `;
+
+      panesHtml += `
+        <div class="cgm-portraits-pane${isActive}" data-actor-id="${actor.id}">
+          <div class="cgm-portraits-settings">
+            <label class="cgm-portraits-toggle">
+              <input type="checkbox" data-field="customPortraitEnabled" ${customPortraitEnabled ? "checked" : ""}>
+              <span>Use Custom Portrait</span>
+            </label>
+            <label class="cgm-portraits-toggle">
+              <input type="checkbox" data-field="portraitFilesEnabled" ${portraitFilesEnabled ? "checked" : ""}>
+              <span>Use Actor File Container</span>
+            </label>
+
+            <!-- Custom Portrait Image -->
+            <div class="cgm-portraits-field${customPortraitEnabled ? "" : " cgm-portraits-hidden"}" data-group="customPortraitGroup">
+              <label class="cgm-portraits-field-label">Image Path or URL</label>
+              <div class="cgm-portraits-input-row">
+                <input type="text" data-field="customPortraitImage" value="${foundry.utils.escapeHTML(customPortraitImage)}" placeholder="path/to/image.webp">
+                <button type="button" class="cgm-portraits-browse" data-browse-portrait="${actor.id}" title="Browse files"><i class="fas fa-folder-open"></i></button>
+              </div>
+              <div class="cgm-portraits-file-hint">Supported: png, gif, webp, webm</div>
+              <div class="cgm-portraits-preview${customPortraitImage ? "" : " cgm-portraits-hidden"}">
+                ${isVideo
+                  ? `<video src="${foundry.utils.escapeHTML(customPortraitImage)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-portraits-hidden')"></video>`
+                  : `<img src="${foundry.utils.escapeHTML(customPortraitImage)}" alt="Preview" onerror="this.parentElement.classList.add('cgm-portraits-hidden')">`
+                }
+              </div>
+            </div>
+
+            <!-- Actor File Container -->
+            <div class="cgm-portraits-field${portraitFilesEnabled ? "" : " cgm-portraits-hidden"}" data-group="portraitFilesGroup">
+              <div class="cgm-portraits-section-title"><i class="fas fa-images"></i> Portrait Files</div>
+              <div class="cgm-portraits-file-list" data-file-list>
+                ${fileListHtml}
+              </div>
+              <div class="cgm-portraits-file-actions">
+                <button type="button" class="cgm-portraits-add-files" data-add-files="${actor.id}" title="Add files from folder"><i class="fas fa-plus"></i> Add Files</button>
+                <button type="button" class="cgm-portraits-add-folder" data-add-folder="${actor.id}" title="Add all images/webm from folder"><i class="fas fa-folder-plus"></i> Add Folder</button>
+                <button type="button" class="cgm-portraits-clear-files" data-clear-files="${actor.id}" title="Clear all files"><i class="fas fa-trash"></i> Clear</button>
+              </div>
+            </div>
+
+            <!-- Animation settings -->
+            <div class="cgm-portraits-anim-section${customPortraitEnabled && isVideo ? "" : " cgm-portraits-hidden"}" data-group="animGroup">
+              <div class="cgm-portraits-section-title"><i class="fas fa-film"></i> Animation (webm only)</div>
+              <label>Play Interval <span class="cgm-portraits-val-label">${portraitAnimFrequency === 0 ? "Always" : portraitAnimFrequency + " min"}</span>
+                <input type="range" data-field="portraitAnimFrequency" min="0" max="60" step="1" value="${portraitAnimFrequency}">
+              </label>
+              <label>Loops per Interval <span class="cgm-portraits-val-label">${portraitAnimLoops === 0 ? "Infinite" : portraitAnimLoops}</span>
+                <input type="range" data-field="portraitAnimLoops" min="0" max="20" step="1" value="${portraitAnimLoops}">
+              </label>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    const content = `
+      <div class="cgm-portraits-dialog">
+        <div class="cgm-portraits-tabs">
+          ${tabsHtml}
+        </div>
+        <div class="cgm-portraits-content">
+          ${panesHtml}
+        </div>
+        <div class="cgm-portraits-footer">
+          <button type="button" class="cgm-portraits-save" data-action="savePortraits"><i class="fas fa-check"></i> Save All Changes</button>
+        </div>
+      </div>
+    `;
+
+    const dlg = new Dialog({
+      title: "Manage Actor Portraits",
+      content: content,
+      buttons: {},
+      render: (html) => {
+        // Handle both jQuery (v10-11) and DOM element (v12+)
+        const $html = html instanceof jQuery ? html : $(html);
+        const container = $html.find('.cgm-portraits-dialog')[0] || $html.filter('.cgm-portraits-dialog')[0];
+        if (!container) {
+          console.warn("[CGM] Portraits dialog: container not found");
+          return;
+        }
+
+        // ── Tab switching ──
+        container.querySelectorAll('.cgm-portraits-tab').forEach(tab => {
+          tab.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const actorId = tab.dataset.actorId;
+            container.querySelectorAll('.cgm-portraits-tab').forEach(t => t.classList.remove('is-active'));
+            container.querySelectorAll('.cgm-portraits-pane').forEach(p => p.classList.remove('is-active'));
+            tab.classList.add('is-active');
+            const targetPane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+            if (targetPane) targetPane.classList.add('is-active');
+          });
+        });
+
+        // ── Custom Portrait toggle ──
+        container.querySelectorAll('input[data-field="customPortraitEnabled"]').forEach(cb => {
+          cb.addEventListener('change', (e) => {
+            const pane = e.target.closest('.cgm-portraits-pane');
+            const group = pane.querySelector('[data-group="customPortraitGroup"]');
+            const pathInput = pane.querySelector('input[data-field="customPortraitImage"]');
+            const preview = pane.querySelector('.cgm-portraits-preview');
+            const animSection = pane.querySelector('[data-group="animGroup"]');
+
+            if (e.target.checked) {
+              group?.classList.remove('cgm-portraits-hidden');
+              if (pathInput?.value) preview?.classList.remove('cgm-portraits-hidden');
+              const isVideo = this._isPortraitVideoPath(pathInput?.value || "");
+              if (isVideo) animSection?.classList.remove('cgm-portraits-hidden');
+            } else {
+              group?.classList.add('cgm-portraits-hidden');
+              preview?.classList.add('cgm-portraits-hidden');
+              animSection?.classList.add('cgm-portraits-hidden');
+            }
+          });
+        });
+
+        // ── File Container toggle ──
+        container.querySelectorAll('input[data-field="portraitFilesEnabled"]').forEach(cb => {
+          cb.addEventListener('change', (e) => {
+            const pane = e.target.closest('.cgm-portraits-pane');
+            const group = pane.querySelector('[data-group="portraitFilesGroup"]');
+            if (e.target.checked) {
+              group?.classList.remove('cgm-portraits-hidden');
+            } else {
+              group?.classList.add('cgm-portraits-hidden');
+            }
+          });
+        });
+
+        // ── Path input → preview update ──
+        container.querySelectorAll('input[data-field="customPortraitImage"]').forEach(input => {
+          input.addEventListener('input', (e) => {
+            const pane = e.target.closest('.cgm-portraits-pane');
+            const preview = pane.querySelector('.cgm-portraits-preview');
+            const animSection = pane.querySelector('[data-group="animGroup"]');
+            const path = e.target.value.trim();
+
+            if (path) {
+              preview.classList.remove('cgm-portraits-hidden');
+              const isVideo = this._isPortraitVideoPath(path);
+              preview.innerHTML = isVideo
+                ? `<video src="${foundry.utils.escapeHTML(path)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-portraits-hidden')"></video>`
+                : `<img src="${foundry.utils.escapeHTML(path)}" alt="Preview" onerror="this.parentElement.classList.add('cgm-portraits-hidden')">`;
+              if (isVideo) animSection?.classList.remove('cgm-portraits-hidden');
+              else animSection?.classList.add('cgm-portraits-hidden');
+            } else {
+              preview.classList.add('cgm-portraits-hidden');
+              animSection?.classList.add('cgm-portraits-hidden');
+            }
+          });
+        });
+
+        // ── Range sliders → labels ──
+        container.querySelectorAll('input[type="range"]').forEach(range => {
+          range.addEventListener('input', (e) => {
+            const field = e.target.dataset.field;
+            const val = parseInt(e.target.value);
+            const label = e.target.closest('label')?.querySelector('.cgm-portraits-val-label');
+            if (!label) return;
+            if (field === "portraitAnimFrequency") {
+              label.textContent = val === 0 ? "Always" : val + " min";
+            } else if (field === "portraitAnimLoops") {
+              label.textContent = val === 0 ? "Infinite" : val;
+            }
+          });
+        });
+
+        // ── File browse button ──
+        container.querySelectorAll('[data-browse-portrait]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const actorId = btn.dataset.browsePortrait;
+            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+            const input = pane?.querySelector('input[data-field="customPortraitImage"]');
+            if (!input) return;
+
+            const fp = new FilePicker({
+              type: "imagevideo",
+              current: input.value || "",
+              callback: (path) => {
+                input.value = path;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+            });
+            await fp.browse();
+          });
+        });
+
+        // ── Add files button ──
+        container.querySelectorAll('[data-add-files]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const actorId = btn.dataset.addFiles;
+            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+            const listEl = pane?.querySelector('[data-file-list]');
+            if (!listEl) return;
+
+            const fp = new FilePicker({
+              type: "imagevideo",
+              callback: (path) => {
+                // Add to file list in DOM
+                const emptyMsg = listEl.querySelector('.cgm-portraits-file-empty');
+                if (emptyMsg) emptyMsg.remove();
+
+                const idx = listEl.querySelectorAll('.cgm-portraits-file-item').length;
+                const item = document.createElement('div');
+                item.className = 'cgm-portraits-file-item';
+                item.dataset.fileIdx = idx;
+                item.innerHTML = `
+                  <span class="cgm-portraits-file-name" title="${foundry.utils.escapeHTML(path)}">${foundry.utils.escapeHTML(path.split('/').pop())}</span>
+                  <button type="button" class="cgm-portraits-file-remove" data-remove-file="${idx}" title="Remove"><i class="fas fa-times"></i></button>
+                `;
+                listEl.appendChild(item);
+
+                // Bind remove on new item
+                item.querySelector('.cgm-portraits-file-remove')?.addEventListener('click', () => {
+                  item.remove();
+                  if (!listEl.querySelectorAll('.cgm-portraits-file-item').length) {
+                    listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
+                  }
+                });
+              }
+            });
+            await fp.browse();
+          });
+        });
+
+        // ── Add folder button ──
+        container.querySelectorAll('[data-add-folder]').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const actorId = btn.dataset.addFolder;
+            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+            const listEl = pane?.querySelector('[data-file-list]');
+            if (!listEl) return;
+
+            const fp = new FilePicker({
+              type: "folder",
+              callback: async (folderPath) => {
+                try {
+                  const resp = await FilePicker.browse("data", folderPath);
+                  const files = resp.files.filter(f => /\.(png|jpg|jpeg|gif|webp|webm)$/i.test(f));
+                  if (!files.length) {
+                    return ui.notifications.warn("No image or webm files found in selected folder.");
+                  }
+
+                  const emptyMsg = listEl.querySelector('.cgm-portraits-file-empty');
+                  if (emptyMsg) emptyMsg.remove();
+
+                  let startIdx = listEl.querySelectorAll('.cgm-portraits-file-item').length;
+                  for (const path of files) {
+                    const idx = startIdx++;
+                    const item = document.createElement('div');
+                    item.className = 'cgm-portraits-file-item';
+                    item.dataset.fileIdx = idx;
+                    item.innerHTML = `
+                      <span class="cgm-portraits-file-name" title="${foundry.utils.escapeHTML(path)}">${foundry.utils.escapeHTML(path.split('/').pop())}</span>
+                      <button type="button" class="cgm-portraits-file-remove" data-remove-file="${idx}" title="Remove"><i class="fas fa-times"></i></button>
+                    `;
+                    listEl.appendChild(item);
+
+                    item.querySelector('.cgm-portraits-file-remove')?.addEventListener('click', () => {
+                      item.remove();
+                      if (!listEl.querySelectorAll('.cgm-portraits-file-item').length) {
+                        listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
+                      }
+                    });
+                  }
+
+                  ui.notifications.info(`Added ${files.length} file(s) from folder.`);
+                } catch (err) {
+                  console.error("[CGM] Failed to browse folder:", err);
+                  ui.notifications.error("Failed to read folder contents.");
+                }
+              }
+            });
+            await fp.browse();
+          });
+        });
+
+        // ── Clear files button ──
+        container.querySelectorAll('[data-clear-files]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const actorId = btn.dataset.clearFiles;
+            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+            const listEl = pane?.querySelector('[data-file-list]');
+            if (listEl) {
+              listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
+            }
+          });
+        });
+
+        // ── Bind remove on existing file items ──
+        container.querySelectorAll('.cgm-portraits-file-remove').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const item = btn.closest('.cgm-portraits-file-item');
+            const listEl = item?.parentElement;
+            item?.remove();
+            if (listEl && !listEl.querySelectorAll('.cgm-portraits-file-item').length) {
+              listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
+            }
+          });
+        });
+
+        // ── Save button ──
+        container.querySelector('[data-action="savePortraits"]')?.addEventListener('click', async () => {
+          let saved = 0;
+          for (const actor of actors) {
+            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actor.id}"]`);
+            if (!pane) continue;
+
+            const prefs = { ...(actor.getFlag("cypher-taskbar", "taskbarPrefs") ?? {}) };
+
+            const customPortraitEnabled = pane.querySelector('input[data-field="customPortraitEnabled"]')?.checked ?? false;
+            const portraitFilesEnabled = pane.querySelector('input[data-field="portraitFilesEnabled"]')?.checked ?? false;
+            const customPortraitImage = pane.querySelector('input[data-field="customPortraitImage"]')?.value?.trim() || "";
+            const portraitAnimFrequency = parseInt(pane.querySelector('input[data-field="portraitAnimFrequency"]')?.value ?? "0");
+            const portraitAnimLoops = parseInt(pane.querySelector('input[data-field="portraitAnimLoops"]')?.value ?? "0");
+
+            // Collect file list from DOM
+            const fileItems = pane.querySelectorAll('[data-file-list] .cgm-portraits-file-item');
+            const portraitFiles = Array.from(fileItems).map(item => {
+              const titleEl = item.querySelector('.cgm-portraits-file-name');
+              return titleEl?.title || "";
+            }).filter(Boolean);
+
+            prefs.customPortraitEnabled = customPortraitEnabled;
+            prefs.portraitFilesEnabled = portraitFilesEnabled;
+            if (customPortraitImage) prefs.customPortraitImage = customPortraitImage;
+            else delete prefs.customPortraitImage;
+            prefs.portraitAnimFrequency = portraitAnimFrequency;
+            prefs.portraitAnimLoops = portraitAnimLoops;
+            if (portraitFiles.length) prefs.portraitFiles = portraitFiles;
+            else delete prefs.portraitFiles;
+
+            try {
+              await actor.setFlag("cypher-taskbar", "taskbarPrefs", prefs);
+              saved++;
+            } catch (err) {
+              console.error(`[CGM] Failed to save portrait settings for ${actor.name}:`, err);
+            }
+          }
+
+          ui.notifications.info(`Cypher GM Taskbar: portrait settings saved for ${saved} actor(s).`);
+          dlg.close();
+        });
+      }
+    }, {
+      width: 520,
+      classes: ["cgm-portraits-dialog-window"]
+    });
+
+    dlg.render(true);
+  }
+
+  /** Check if a portrait path is a video file (webm) */
+  _isPortraitVideoPath(path) {
+    if (!path || typeof path !== "string") return false;
+    return path.toLowerCase().endsWith(".webm");
   }
 
   /** Get pending XP requests count using cypher-xp DevelopmentService */
@@ -628,10 +1032,6 @@ class GMTaskbar {
       if (!appEl.querySelector(".cgm-xp-dashboard-header")) {
         this._injectXpDashboardHeader(appEl);
       }
-      // Re-inject history tab if it was destroyed by Foundry re-render
-      if (!appEl.querySelector("[data-tab='history']")) {
-        this._injectXpHistoryTab(appEl);
-      }
       // If requests tab is visible, inject actor icons
       if (appEl.querySelector("[data-tab='requests']")?.classList.contains("active") ||
           appEl.querySelector(".cxp-list")) {
@@ -641,129 +1041,6 @@ class GMTaskbar {
     observer.observe(appEl, { childList: true, subtree: true });
     // Store observer on appEl so it can be cleaned up later
     appEl._cgmRequestObserver = observer;
-  }
-
-  /** Inject a History tab into the Cypher XP GM Dashboard */
-  _injectXpHistoryTab(appEl) {
-    if (!appEl) return;
-    const tabsNav = appEl.querySelector(".cxp-tabs");
-    if (!tabsNav) return;
-
-    // Create the History tab link if missing
-    let historyTab = tabsNav.querySelector("[data-tab='history']");
-    if (!historyTab) {
-      historyTab = document.createElement("a");
-      historyTab.dataset.action = "changeTab";
-      historyTab.dataset.tab = "history";
-      historyTab.textContent = "History";
-      historyTab.className = "";
-      tabsNav.appendChild(historyTab);
-    }
-
-    // Create the history panel if missing (hidden by default)
-    const tabContent = appEl.querySelector(".cxp-tab-content");
-    if (tabContent) {
-      let historyPanel = tabContent.querySelector(".cgm-xp-history-panel");
-      if (!historyPanel) {
-        historyPanel = document.createElement("div");
-        historyPanel.className = "cgm-xp-history-panel";
-        historyPanel.style.display = "none";
-        tabContent.appendChild(historyPanel);
-      }
-    }
-
-    // Attach click handler once only
-    if (tabsNav._cgmHistoryClickAttached) return;
-    tabsNav._cgmHistoryClickAttached = true;
-
-    tabsNav.addEventListener("click", (e) => {
-      const target = e.target.closest("[data-action='changeTab']");
-      if (!target) return;
-      const tab = target.dataset.tab;
-      const historyPanel = appEl.querySelector(".cgm-xp-history-panel");
-      if (!historyPanel) return;
-
-      if (tab === "history") {
-        e.preventDefault();
-        e.stopPropagation();
-        for (const a of tabsNav.querySelectorAll("a")) a.classList.remove("active");
-        target.classList.add("active");
-        for (const child of tabContent.children) {
-          if (!child.classList.contains("cgm-xp-history-panel")) {
-            child.style.display = "none";
-          }
-        }
-        historyPanel.style.display = "block";
-        this._renderXpHistoryPanel(historyPanel);
-      } else {
-        historyPanel.style.display = "none";
-        for (const child of tabContent.children) {
-          if (!child.classList.contains("cgm-xp-history-panel")) {
-            child.style.display = "";
-          }
-        }
-      }
-    });
-  }
-
-  /** Render the history log into the history panel */
-  _renderXpHistoryPanel(panel) {
-    if (!panel) return;
-    const entries = [...this._xpActionHistory].reverse(); // newest first
-    if (!entries.length) {
-      panel.innerHTML = `<div class="cgm-xp-history-empty">No actions recorded yet.</div>`;
-      return;
-    }
-
-    const formatTime = (ts) => {
-      const d = new Date(ts);
-      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    };
-
-    const getIcon = (type) => {
-      switch (type) {
-        case "awardXP": return "fa-gift";
-        case "adjustXpUp": return "fa-arrow-up";
-        case "adjustXpDown": return "fa-arrow-down";
-        case "requestCreated": return "fa-file-circle-plus";
-        case "requestApproved": return "fa-check";
-        case "requestRejected": return "fa-xmark";
-        case "tierBreakthrough": return "fa-arrow-up";
-        case "purchaseApplied": return "fa-cart-shopping";
-        default: return "fa-circle";
-      }
-    };
-
-    const getLabel = (entry) => {
-      switch (entry.type) {
-        case "awardXP": return `Awarded <strong>${entry.amount} XP</strong> to ${entry.actorName}${entry.reason ? ` — "${entry.reason}"` : ""}`;
-        case "adjustXpUp": return `Raised <strong>${entry.actorName}</strong> by <strong>+${entry.amount} XP</strong>${entry.reason ? ` — "${entry.reason}"` : ""}`;
-        case "adjustXpDown": return `Lowered <strong>${entry.actorName}</strong> by <strong>-${entry.amount} XP</strong>${entry.reason ? ` — "${entry.reason}"` : ""}`;
-        case "requestCreated": return `<strong>${entry.actorName}</strong> requested <strong>${entry.label}</strong> (${entry.requestedCost} XP)`;
-        case "requestApproved": return `Approved <strong>${entry.label}</strong> for ${entry.actorName}`;
-        case "requestRejected": return `Rejected <strong>${entry.label}</strong> for ${entry.actorName}`;
-        case "tierBreakthrough": return `<strong>${entry.actorName}</strong> advanced from Tier ${entry.fromTier} → ${entry.toTier}`;
-        case "purchaseApplied": return `<strong>${entry.actorName}</strong> purchased <strong>${entry.label}</strong> (${entry.cost} XP)`;
-        default: return entry.label || "Unknown action";
-      }
-    };
-
-    const html = entries.map((entry, i) => {
-      const isUndone = entry.undone;
-      const isCurrent = (this._xpActionHistory.length - 1 - i) === this._xpHistoryIndex;
-      return `
-        <div class="cgm-xp-history-item ${isUndone ? 'cgm-xp-history-undone' : ''} ${isCurrent ? 'cgm-xp-history-current' : ''}">
-          <img src="${entry.actorImg || 'icons/svg/mystery-man.svg'}" alt="" class="cgm-xp-history-avatar">
-          <div class="cgm-xp-history-body">
-            <div class="cgm-xp-history-time">${formatTime(entry.timestamp)}</div>
-            <div class="cgm-xp-history-text"><i class="fas ${getIcon(entry.type)}"></i> ${getLabel(entry)}</div>
-          </div>
-          ${isCurrent ? '<span class="cgm-xp-history-marker" title="Current position">●</span>' : ''}
-        </div>
-      `;
-    }).join("");
-
-    panel.innerHTML = `<div class="cgm-xp-history-list">${html}</div>`;
   }
 
   /** Inline award XP flow — replicates cypher-xp DevelopmentService.gmAward */
@@ -1133,16 +1410,24 @@ class GMTaskbar {
     const iconClass = spendIcons[payload.spendType] || "fa-star";
 
     const result = await new Promise((resolve) => {
-      new Dialog({
+      const dlg = new Dialog({
+        classes: ["cgm-xp-request-dialog"],
         title: "XP Spend Request",
         content: `
-          <div style="padding:16px;text-align:center;">
-            <div style="font-size:2em;color:#ffd700;margin-bottom:8px;"><i class="fas ${iconClass}"></i></div>
-            <div style="font-size:1.1em;font-weight:700;margin-bottom:4px;">${foundry.utils.escapeHTML(payload.userName)} wants to spend XP</div>
-            <div style="color:#c8a96e;margin-bottom:2px;">Character: <strong>${foundry.utils.escapeHTML(payload.actorName)}</strong></div>
-            <div style="color:#f0d68a;margin-bottom:2px;">Action: <strong>${foundry.utils.escapeHTML(payload.label)}</strong></div>
-            <div style="color:#ffd700;margin-bottom:8px;">Cost: <strong>${payload.xpCost} XP</strong></div>
-            <div style="font-size:0.85em;color:#7a7a7a;">Approve to deduct XP and log the spend.</div>
+          <div class="cgm-xp-request-body">
+            <div class="cgm-xp-request-icon"><i class="fas ${iconClass}"></i></div>
+            <div class="cgm-xp-request-user">${foundry.utils.escapeHTML(payload.userName)} wants to spend XP</div>
+            <div class="cgm-xp-request-divider"></div>
+            <div class="cgm-xp-request-detail">
+              <span class="cgm-xp-request-label">Character:</span>
+              <span class="cgm-xp-request-value">${foundry.utils.escapeHTML(payload.actorName)}</span>
+            </div>
+            <div class="cgm-xp-request-detail">
+              <span class="cgm-xp-request-label">Action:</span>
+              <span class="cgm-xp-request-value">${foundry.utils.escapeHTML(payload.label)}</span>
+            </div>
+            <div class="cgm-xp-request-cost">Cost: <strong>${payload.xpCost} XP</strong></div>
+            <div class="cgm-xp-request-hint">Approve to deduct XP and log the spend.</div>
           </div>`,
         buttons: {
           approve: {
@@ -1156,8 +1441,56 @@ class GMTaskbar {
             callback: () => resolve("deny")
           }
         },
-        default: "approve"
-      }).render(true);
+        default: "approve",
+        width: 520,
+        render: (html) => {
+          const win = html.closest('.window-app');
+          if (win) {
+            setTimeout(() => {
+              const rect = win.getBoundingClientRect();
+              const screenW = window.innerWidth;
+              const screenH = window.innerHeight;
+              win.style.left = Math.max(0, (screenW - rect.width) / 2) + 'px';
+              win.style.top = Math.max(0, (screenH - rect.height) / 2) + 'px';
+            }, 10);
+          }
+          const content = html.closest('.window-content') || html.find('.window-content')[0];
+          if (content) {
+          }
+          const btns = html.find('.dialog-buttons button');
+          btns.each((i, btn) => {
+            btn.style.background = 'linear-gradient(180deg, #1e1810, #14100c)';
+            btn.style.border = '1px solid rgba(200, 169, 110, 0.35)';
+            btn.style.color = '#e8dcc8';
+            btn.style.borderRadius = '6px';
+            btn.style.padding = '8px 14px';
+            btn.style.fontFamily = 'var(--cgm-font, "Segoe UI", sans-serif)';
+            btn.style.fontSize = '0.9em';
+            btn.style.fontWeight = '500';
+            btn.style.transition = 'all 0.2s ease';
+            btn.style.cursor = 'pointer';
+            btn.onmouseenter = () => {
+              btn.style.background = 'linear-gradient(180deg, #2a2018, #1a1410)';
+              btn.style.borderColor = 'rgba(200, 169, 110, 0.7)';
+              btn.style.boxShadow = '0 0 10px rgba(200, 169, 110, 0.15)';
+              btn.style.transform = 'translateY(-1px)';
+            };
+            btn.onmouseleave = () => {
+              btn.style.background = 'linear-gradient(180deg, #1e1810, #14100c)';
+              btn.style.borderColor = 'rgba(200, 169, 110, 0.35)';
+              btn.style.boxShadow = 'none';
+              btn.style.transform = 'translateY(0)';
+            };
+            if (btn.dataset.button === 'approve') {
+              btn.style.borderColor = 'rgba(80, 180, 80, 0.4)';
+            }
+            if (btn.dataset.button === 'deny') {
+              btn.style.borderColor = 'rgba(180, 80, 80, 0.4)';
+            }
+          });
+        }
+      });
+      dlg.render(true);
     });
 
     if (result === "approve") {
@@ -1405,6 +1738,8 @@ class GMTaskbar {
   /* ─── Render ─── */
 
   render() {
+    this._stopLayoutHealthMonitor();
+    if (this._buttonObserver) { this._buttonObserver.disconnect(); this._buttonObserver = null; }
     document.querySelector(`#${MODULE_ID}-bar`)?.remove();
     document.querySelector(`.cgm-panel`)?.remove();
     document.querySelector(`.cgm-portraits-bg-wrap`)?.remove();
@@ -1439,6 +1774,7 @@ class GMTaskbar {
     this._bindEvents();
     this._setupSectionDragAndDrop();
     this._restoreButtonOrder();   // restore saved button order within sections
+    this._enforceButtonSections(); // enforce correct section containment
     this._bindPortraitEvents();
     this._startConnectionMonitor();
     this._startPlayerMonitor();
@@ -1462,9 +1798,13 @@ class GMTaskbar {
       this._discoverDynamicButtons();
       this._correctDynamicButtonPositions();
       this._restoreButtonOrder();
+      this._enforceButtonSections();
     }, 100);
 
     if (this.activePanel) this._openPanel(this.activePanel);
+
+    // Start periodic layout health monitor
+    this._startLayoutHealthMonitor();
   }
 
   /* Update global difficulty box display without full re-render */
@@ -1491,6 +1831,7 @@ class GMTaskbar {
       { id: "enemy", action: "openEnemyCanvas", icon: "fa-tooth", color: "#cc3333", title: "Enemy Canvas", defaultSection: 1 },
       { id: "items", action: "openItemsCanvas", icon: "fa-hammer", color: "", title: "Items", defaultSection: 1 },
       { id: "reputation", action: "openReputation", icon: "fa-handshake", color: "#e8a87c", title: "Reputation and gossips", defaultSection: 1 },
+      { id: "random", action: "openRandomPanel", icon: "fa-globe", color: "#8a6de9", title: "Random", defaultSection: 1 },
       { id: "connections", action: "openConnections", icon: "fa-project-diagram", color: "#c9a227", title: "Connections", defaultSection: 1, requiresModule: "cypher-connections" },
       { id: "recovery", action: "openRecoveryMenu", icon: "fa-droplet", color: "#3b82f6", title: "Recovery", defaultSection: 0 },
     ];
@@ -1527,7 +1868,7 @@ class GMTaskbar {
 
     // Only skip our built-in static buttons — injected buttons must be re-discovered
     // after every render since their DOM elements (and event listeners) are destroyed
-    const staticIds = new Set(["gmroll", "groupstatus", "quickscene", "cypherlog", "scene", "npc", "items"]);
+    const staticIds = new Set(["gmroll", "groupstatus", "quickscene", "cypherlog", "scene", "npc", "items", "enemy", "reputation", "random", "connections", "recovery"]);
     const dynamic = [];
     const sections = bar.querySelectorAll('.cgm-custom-section');
 
@@ -1691,9 +2032,20 @@ class GMTaskbar {
         <!-- Left side: GM Brand + Global Difficulty Box -->
         <button class="cgm-brand" data-action="openGMMenu" title="GM Menu"><i class="fas fa-dungeon"></i> GM</button>
 
+        <!-- GM Tasks button -->
+        <button class="cgm-gm-tasks-btn" id="cgm-btn-gm-tasks" data-action="openGMTasks" title="GM Tasks">
+          <i class="fas fa-clipboard-list"></i>
+          <span class="cgm-gm-tasks-count" id="cgm-gm-tasks-count"></span>
+        </button>
+
         <!-- Cypher XP button (always shown, checks on click) -->
         <button class="cgm-icon-btn cgm-xp-btn" id="cgm-btn-xp" title="Cypher XP">
           <i class="fas fa-star" style="color:#ffd700;"></i>
+        </button>
+
+        <!-- Portraits button -->
+        <button class="cgm-icon-btn cgm-portraits-btn" id="cgm-btn-portraits" title="Manage Actor Portraits">
+          <i class="fas fa-portrait" style="color:#c8a96e;"></i>
         </button>
 
         <!-- Global Difficulty Box -->
@@ -1881,6 +2233,17 @@ class GMTaskbar {
 
   /* ─── Floating Portraits (above bar, left side) ─── */
 
+  /** Check if any player owner of this actor is currently connected */
+  _isActorOwnerActive(actorId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return false;
+    return game.users?.some(u => {
+      if (!u.active || u.isGM) return false;
+      if (u.character?.id === actorId) return true;
+      return actor.testUserPermission(u, "OWNER");
+    }) ?? false;
+  }
+
   _buildPortraitsFloat() {
     let pcs = this._getPartyData();
     if (!pcs.length) return ``;
@@ -1935,8 +2298,9 @@ class GMTaskbar {
           const actor = game.actors.get(pc.id);
           const individualDiff = actor?.getFlag("cypher-gm-taskbar", "targetDifficulty") ?? 0;
           const isDisconnected = this._disconnectedActors?.has(pc.id);
+          const isActive = this._isActorOwnerActive(pc.id);
           return `
-          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isDisconnected ? 'cgm-portrait-disconnected' : ''}" data-actor-id="${pc.id}">
+          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isDisconnected ? 'cgm-portrait-disconnected' : ''} ${isActive ? 'cgm-portrait-active' : ''}" data-actor-id="${pc.id}">
             <div class="cgm-portrait-difficulty ${individualDiff > 0 ? 'cgm-difficulty-active' : ''}">${individualDiff > 0 ? individualDiff : ''}</div>
             ${isDisconnected ? '<div class="cgm-offline-badge"><i class="fas fa-wifi-slash"></i></div>' : ''}
             <div class="cgm-portrait-visual">
@@ -2540,6 +2904,9 @@ ${paths}  </svg>
 
     document.body.appendChild(menu);
     this._gmMenuEl = menu;
+
+    // Sync GM tasks and render in menu
+    this._syncGMTasks();
 
     // Position AFTER append so we can measure actual rendered height
     // Bottom-left corner of menu sits just above the GM button
@@ -3748,6 +4115,359 @@ ${paths}  </svg>
     ui.notifications.info(`Gossip "${gossip.name}" is now ${status} to ${actor.name}.`);
   }
 
+  /* ════════════════════════════════════════
+     RANDOM PANEL — Journal Grid
+     ════════════════════════════════════════ */
+
+  _toggleRandomPanel(btnEl) {
+    if (this._randomPanelEl) {
+      this._hideRandomPanel();
+      return;
+    }
+    this._showRandomPanel(btnEl);
+  }
+
+  _hideRandomPanel() {
+    if (this._randomPanelEl) {
+      this._randomPanelEl.classList.remove("cgm-random-visible");
+      setTimeout(() => {
+        this._randomPanelEl?.remove();
+        this._randomPanelEl = null;
+      }, 200);
+    }
+  }
+
+  async _showRandomPanel(btnEl) {
+    this._hideRandomPanel();
+
+    const panelW = 520;
+    const panelH = 460;
+
+    const rect = btnEl.getBoundingClientRect();
+    let panelLeft = rect.left + rect.width / 2 - panelW / 2;
+    let panelTop = rect.bottom + 8;
+
+    panelLeft = Math.max(8, Math.min(panelLeft, window.innerWidth - panelW - 8));
+    const spaceBelow = window.innerHeight - rect.bottom - 8;
+    if (spaceBelow < panelH && rect.top > panelH + 16) {
+      panelTop = rect.top - panelH - 8;
+    }
+    panelTop = Math.max(8, Math.min(panelTop, window.innerHeight - panelH - 8));
+
+    if (this._randomPanelPos) {
+      const clamped = this._clampPanelPos(this._randomPanelPos.left, this._randomPanelPos.top, panelW, panelH);
+      panelLeft = clamped.left;
+      panelTop = clamped.top;
+      this._randomPanelPos = clamped;
+    }
+
+    const panel = document.createElement("div");
+    panel.className = "cgm-random-panel";
+    panel.style.cssText = `position:fixed;left:${panelLeft}px;top:${panelTop}px;width:${panelW}px;height:${panelH}px;z-index:202;`;
+
+    panel.innerHTML = `
+      <div class="cgm-random-header">
+        <i class="fas fa-globe"></i>
+        <span>Random</span>
+        <div class="cgm-random-header-actions">
+          <button class="cgm-random-unlock-btn" title="${this._randomPanelUnlocked ? 'Lock grid' : 'Unlock grid'}">
+            <i class="fas ${this._randomPanelUnlocked ? 'fa-lock-open' : 'fa-lock'}"></i>
+          </button>
+          <button class="cgm-random-close"><i class="fas fa-xmark"></i></button>
+        </div>
+      </div>
+      <div class="cgm-random-body">
+        <div class="cgm-random-grid">
+          ${this._buildRandomGridItems()}
+        </div>
+        <div class="cgm-random-dropzone">
+          <i class="fas fa-plus-circle"></i>
+          <span>Drop journal entries here</span>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    this._randomPanelEl = panel;
+    requestAnimationFrame(() => panel.classList.add("cgm-random-visible"));
+
+    this._bindRandomPanelEvents();
+    this._setupRandomPanelDrag();
+  }
+
+  _buildRandomGridItems() {
+    const data = this._getRandomPanelData();
+    if (!data.length) {
+      return `<div class="cgm-random-empty">No journals yet. Drop journal entries here!</div>`;
+    }
+    return data.map((item, idx) => {
+      const doc = this._getJournalByUuid(item.uuid);
+      const name = doc?.name || "Unknown";
+      const img = item.img || doc?.img || "icons/svg/book.svg";
+      const size = item.size || 64;
+      const unlockClass = this._randomPanelUnlocked ? "cgm-random-item-unlocked" : "";
+      return `
+        <div class="cgm-random-item ${unlockClass}" data-idx="${idx}" title="${foundry.utils.escapeHTML(name)}" style="--item-size:${size}px;">
+          <div class="cgm-random-item-img-wrap">
+            <img src="${img}" alt="${foundry.utils.escapeHTML(name)}">
+          </div>
+          <div class="cgm-random-item-label">${foundry.utils.escapeHTML(name)}</div>
+          ${this._randomPanelUnlocked ? `<button class="cgm-random-item-remove" data-remove-idx="${idx}" title="Remove"><i class="fas fa-times"></i></button>` : ""}
+        </div>
+      `;
+    }).join("");
+  }
+
+  _bindRandomPanelEvents() {
+    this._bindRandomPanelStaticEvents();
+    this._bindRandomPanelGridEvents();
+  }
+
+  _bindRandomPanelStaticEvents() {
+    const panel = this._randomPanelEl;
+    if (!panel || panel.dataset.staticEventsBound === "true") return;
+    panel.dataset.staticEventsBound = "true";
+
+    // Close button
+    panel.querySelector(".cgm-random-close")?.addEventListener("click", () => {
+      this._hideRandomPanel();
+    });
+
+    // Unlock button
+    panel.querySelector(".cgm-random-unlock-btn")?.addEventListener("click", () => {
+      this._randomPanelUnlocked = !this._randomPanelUnlocked;
+      this._renderRandomPanelContent();
+    });
+  }
+
+  _bindRandomPanelGridEvents() {
+    const panel = this._randomPanelEl;
+    if (!panel) return;
+
+    // Click on journal items (open journal OR edit if unlocked)
+    panel.querySelectorAll(".cgm-random-item").forEach(item => {
+      item.addEventListener("click", (e) => {
+        if (e.target.closest(".cgm-random-item-remove")) return;
+        const idx = parseInt(item.dataset.idx, 10);
+        if (this._randomPanelUnlocked) {
+          this._showRandomItemEditDialog(idx);
+        } else {
+          const data = this._getRandomPanelData();
+          const entry = data[idx];
+          if (entry) {
+            const doc = this._getJournalByUuid(entry.uuid);
+            if (doc) {
+              doc.sheet.render(true);
+              this._hideRandomPanel();
+            }
+          }
+        }
+      });
+    });
+
+    // Remove buttons (only visible when unlocked)
+    panel.querySelectorAll(".cgm-random-item-remove").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.removeIdx, 10);
+        await this._removeJournalFromRandom(idx);
+        this._renderRandomPanelContent();
+      });
+    });
+  }
+
+  _renderRandomPanelContent() {
+    const panel = this._randomPanelEl;
+    if (!panel) return;
+    const grid = panel.querySelector(".cgm-random-grid");
+    if (grid) grid.innerHTML = this._buildRandomGridItems();
+    const unlockBtn = panel.querySelector(".cgm-random-unlock-btn");
+    if (unlockBtn) {
+      unlockBtn.title = this._randomPanelUnlocked ? "Lock grid" : "Unlock grid";
+      unlockBtn.innerHTML = `<i class="fas ${this._randomPanelUnlocked ? 'fa-lock-open' : 'fa-lock'}"></i>`;
+    }
+    this._bindRandomPanelGridEvents();
+  }
+
+  _setupRandomPanelDrag() {
+    const panel = this._randomPanelEl;
+    if (!panel) return;
+
+    const dropzone = panel.querySelector(".cgm-random-dropzone");
+    const grid = panel.querySelector(".cgm-random-grid");
+
+    [dropzone, grid].forEach(zone => {
+      if (!zone) return;
+      zone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        zone.classList.add("cgm-random-dragover");
+      });
+      zone.addEventListener("dragleave", () => {
+        zone.classList.remove("cgm-random-dragover");
+      });
+      zone.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        zone.classList.remove("cgm-random-dragover");
+        const data = e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/uri-list");
+        if (!data) return;
+        // Try to parse as UUID
+        let uuid = data;
+        // Handle Foundry drop data JSON
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.uuid) uuid = parsed.uuid;
+        } catch { /* not JSON, use as-is */ }
+        const doc = await fromUuid(uuid);
+        if (doc && doc.documentName === "JournalEntry") {
+          await this._addJournalToRandom(uuid);
+          this._renderRandomPanelContent();
+        } else {
+          ui.notifications.warn("Only Journal Entries can be dropped here.");
+        }
+      });
+    });
+  }
+
+  _getRandomPanelData() {
+    try {
+      const raw = game.settings.get(MODULE_ID, "randomPanelData");
+      return JSON.parse(raw || "[]");
+    } catch {
+      return [];
+    }
+  }
+
+  async _saveRandomPanelData(data) {
+    await game.settings.set(MODULE_ID, "randomPanelData", JSON.stringify(data));
+  }
+
+  async _addJournalToRandom(uuid) {
+    const data = this._getRandomPanelData();
+    if (data.some(item => item.uuid === uuid)) {
+      ui.notifications.warn("This journal is already in the grid.");
+      return;
+    }
+    const doc = this._getJournalByUuid(uuid);
+    data.push({
+      uuid,
+      img: doc?.img || "icons/svg/book.svg",
+      size: 64
+    });
+    await this._saveRandomPanelData(data);
+  }
+
+  async _removeJournalFromRandom(idx) {
+    const data = this._getRandomPanelData();
+    if (idx >= 0 && idx < data.length) {
+      data.splice(idx, 1);
+      await this._saveRandomPanelData(data);
+    }
+  }
+
+  async _updateRandomItem(idx, updates) {
+    const data = this._getRandomPanelData();
+    if (idx >= 0 && idx < data.length) {
+      Object.assign(data[idx], updates);
+      await this._saveRandomPanelData(data);
+    }
+  }
+
+  async _showRandomItemEditDialog(itemIndex) {
+    const data = this._getRandomPanelData();
+    const item = data[itemIndex];
+    if (!item) return;
+
+    const doc = this._getJournalByUuid(item.uuid);
+    const name = doc?.name || "Unknown";
+    const currentImg = item.img || doc?.img || "icons/svg/book.svg";
+    const currentSize = item.size || 64;
+
+    const overlay = document.createElement("div");
+    overlay.className = "cgm-rep-dialog-overlay";
+    overlay.innerHTML = `
+      <div class="cgm-rep-dialog" style="width:380px;">
+        <div class="cgm-rep-dialog-header">
+          <i class="fas fa-globe"></i>
+          <span>Edit: ${foundry.utils.escapeHTML(name)}</span>
+          <button class="cgm-rep-dialog-close" data-random-dialog-close><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="cgm-rep-dialog-body">
+          <div class="cgm-rep-dialog-row">
+            <label>Icon Image</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="text" id="cgm-random-img" class="cgm-rep-dialog-input" value="${foundry.utils.escapeHTML(currentImg)}" placeholder="Image URL">
+              <button class="cgm-rep-dialog-btn" data-random-filepicker title="File Picker"><i class="fas fa-folder-open"></i></button>
+            </div>
+          </div>
+          <div class="cgm-rep-dialog-row">
+            <label>Icon Size: <span id="cgm-random-size-val">${currentSize}</span>px</label>
+            <input type="range" id="cgm-random-size" class="cgm-rep-dialog-range" min="32" max="128" value="${currentSize}">
+          </div>
+          <div class="cgm-rep-dialog-preview" style="text-align:center;padding:12px;">
+            <img id="cgm-random-preview" src="${currentImg}" style="width:${currentSize}px;height:${currentSize}px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,0.2);">
+          </div>
+        </div>
+        <div class="cgm-rep-dialog-footer">
+          <button class="cgm-rep-dialog-cancel" data-random-dialog-cancel>Cancel</button>
+          <button class="cgm-rep-dialog-save" data-random-dialog-save>Save</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add("cgm-rep-dialog-visible"));
+
+    const imgInput = overlay.querySelector("#cgm-random-img");
+    const sizeInput = overlay.querySelector("#cgm-random-size");
+    const sizeVal = overlay.querySelector("#cgm-random-size-val");
+    const preview = overlay.querySelector("#cgm-random-preview");
+
+    const updatePreview = () => {
+      const size = parseInt(sizeInput.value, 10) || 64;
+      sizeVal.textContent = size;
+      preview.style.width = `${size}px`;
+      preview.style.height = `${size}px`;
+      if (imgInput.value) preview.src = imgInput.value;
+    };
+
+    sizeInput?.addEventListener("input", updatePreview);
+    imgInput?.addEventListener("input", updatePreview);
+
+    // File picker
+    overlay.querySelector("[data-random-filepicker]")?.addEventListener("click", async () => {
+      const PickerClass = foundry?.applications?.apps?.FilePicker || FilePicker;
+      const fp = new PickerClass({
+        type: "image",
+        current: imgInput?.value || "",
+        callback: (path) => {
+          if (imgInput) imgInput.value = path;
+          updatePreview();
+        }
+      });
+      await fp.browse();
+    });
+
+    const closeDialog = () => {
+      overlay.classList.remove("cgm-rep-dialog-visible");
+      setTimeout(() => overlay.remove(), 250);
+    };
+
+    overlay.querySelector("[data-random-dialog-close]")?.addEventListener("click", closeDialog);
+    overlay.querySelector("[data-random-dialog-cancel]")?.addEventListener("click", closeDialog);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeDialog();
+    });
+
+    overlay.querySelector("[data-random-dialog-save]")?.addEventListener("click", async () => {
+      const newImg = imgInput?.value?.trim() || currentImg;
+      const newSize = Math.max(32, Math.min(128, parseInt(sizeInput?.value, 10) || 64));
+      await this._updateRandomItem(itemIndex, { img: newImg, size: newSize });
+      closeDialog();
+      this._renderRandomPanelContent();
+    });
+  }
+
   async _doOneRecoveryAll() {
     const pcs = this._getPartyData().map(pc => game.actors.get(pc.id)).filter(a => a);
     if (!pcs.length) {
@@ -3840,6 +4560,8 @@ ${paths}  </svg>
     } else {
       ui.notifications.info("All actors already have full recovery rolls.");
     }
+    this._partyDataCache = null;
+    this.render();
   }
 
   async _doFullRecoveryAll() {
@@ -3886,6 +4608,8 @@ ${paths}  </svg>
       </div>`
     });
     ui.notifications.info(`FULL rest applied to ${recoveredCount} actor(s).`);
+    this._partyDataCache = null;
+    this.render();
   }
 
   _showGMGroupRollAttributes(btnEl) {
@@ -5803,14 +6527,14 @@ ${paths}  </svg>
 
     if (rolls) {
       // rolls = [1Action, 10Min, 1Hour, 10Hours] — true = available, false = spent
-      // Find first spent roll, skipping 10 Hours (index 3)
-      const checkOrder = [0, 1, 2]; // 1 Action, 10 Min, 1 Hour
+      // Interrupted rest restores the HIGHEST spent recovery first
+      const checkOrder = [3, 2, 1, 0]; // 10 Hours, 1 Hour, 10 Min, 1 Action
       for (const idx of checkOrder) {
         if (!rolls[idx]) {
           // This roll is spent — restore it
           rolls[idx] = true;
           recoveryRollsIndex = idx;
-          const names = ["1 Action", "10 Minutes", "1 Hour"];
+          const names = ["1 Action", "10 Minutes", "1 Hour", "10 Hours"];
           resetName = names[idx];
           break;
         }
@@ -5820,6 +6544,10 @@ ${paths}  </svg>
     // ── 2. Fall back to individual flags if no array found ──
     if (recoveryRollsIndex < 0) {
       const checkList = [
+        { key: "tenHours", label: "10 Hours", min: 1, rollsIdx: 3 },
+        { key: "oneHour", label: "1 Hour", min: 1, rollsIdx: 2 },
+        { key: "tenMinutes", label: "10 Minutes", min: 1, rollsIdx: 1 },
+        { key: "tenMinutes2", label: "10 Minutes", min: 2, rollsIdx: 1 },
         { key: "oneAction", label: "1 Action", min: 1, rollsIdx: 0 },
         { key: "oneAction2", label: "1 Action", min: 2, rollsIdx: 0 },
         { key: "oneAction3", label: "1 Action", min: 3, rollsIdx: 0 },
@@ -5827,9 +6555,6 @@ ${paths}  </svg>
         { key: "oneAction5", label: "1 Action", min: 5, rollsIdx: 0 },
         { key: "oneAction6", label: "1 Action", min: 6, rollsIdx: 0 },
         { key: "oneAction7", label: "1 Action", min: 7, rollsIdx: 0 },
-        { key: "tenMinutes", label: "10 Minutes", min: 1, rollsIdx: 1 },
-        { key: "tenMinutes2", label: "10 Minutes", min: 2, rollsIdx: 1 },
-        { key: "oneHour", label: "1 Hour", min: 1, rollsIdx: 2 },
       ];
 
       for (const entry of checkList) {
@@ -5882,6 +6607,8 @@ ${paths}  </svg>
       </div>`
     });
     ui.notifications.info(`${actor.name} takes an interrupted rest. ${resetName} recovery restored.`);
+    this._partyDataCache = null;
+    this.render();
   }
 
   _hideRecoverySubMenu() {
@@ -6032,6 +6759,7 @@ ${paths}  </svg>
     if (!actor) return;
     const name = await new Promise((resolve) => {
       new Dialog({
+        classes: ["cgm-xp-request-dialog"],
         title: `Create Cypher — ${actor.name}`,
         content: `<div style="padding:12px;"><input id="cgm-cypher-name" type="text" style="width:100%;background:rgba(0,0,0,0.5);border:1px solid rgba(138,116,204,0.3);border-radius:4px;color:#e8e0d4;padding:8px;" placeholder="Cypher name..."></div>`,
         buttons: {
@@ -7655,6 +8383,7 @@ ${paths}  </svg>
     `;
 
     new Dialog({
+        classes: ["cgm-xp-request-dialog"],
       title: ``,
       content,
       classes: ["cgm-dark-dialog", "cgm-intrusion-window"],
@@ -7718,6 +8447,7 @@ ${paths}  </svg>
     `;
 
     new Dialog({
+        classes: ["cgm-xp-request-dialog"],
       title: ``,
       content,
       classes: ["cgm-dark-dialog"],
@@ -8039,13 +8769,27 @@ ${paths}  </svg>
         img.style.borderColor = borderColor;
       }
 
-      // Update active effect icons (refresh HTML without full re-render)
+      // Update active effect icons (refresh without full re-render — non-destructive)
       const visualWrap = wrap.querySelector('.cgm-portrait-visual');
       if (visualWrap) {
-        const effectsContainer = visualWrap.querySelector('.cgm-portrait-effects');
+        let effectsContainer = visualWrap.querySelector('.cgm-portrait-effects');
         const newEffectsHTML = this._buildEffectIconsHTML(pc, this._portraitSize);
         if (effectsContainer) {
-          effectsContainer.outerHTML = newEffectsHTML;
+          // Non-destructive: keep the container, swap its children
+          effectsContainer.innerHTML = '';
+          if (newEffectsHTML) {
+            const temp = document.createElement('div');
+            temp.innerHTML = newEffectsHTML;
+            const newContainer = temp.querySelector('.cgm-portrait-effects');
+            if (newContainer) {
+              while (newContainer.firstChild) {
+                effectsContainer.appendChild(newContainer.firstChild);
+              }
+              if (newContainer.dataset.actorId) {
+                effectsContainer.dataset.actorId = newContainer.dataset.actorId;
+              }
+            }
+          }
         } else if (newEffectsHTML) {
           // No existing container but we have effects — insert before img-wrap
           const imgWrap = visualWrap.querySelector('.cgm-portrait-img-wrap');
@@ -8843,6 +9587,15 @@ ${paths}  </svg>
       });
     }
 
+    // Portraits button
+    const portraitsBtn = this.element.querySelector("#cgm-btn-portraits");
+    if (portraitsBtn) {
+      portraitsBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await this._openPortraitsMenu();
+      });
+    }
+
     // Global difficulty controls
     this.element.querySelector('[data-action="globalDiffDown"]')?.addEventListener("click", async () => {
       this._globalDifficulty = Math.max(0, this._globalDifficulty - 1);
@@ -8933,6 +9686,12 @@ ${paths}  </svg>
       this._showGMMenu(e.currentTarget);
     });
 
+    // GM Tasks button
+    this.element.querySelector('[data-action="openGMTasks"]')?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._showGMTasksMenu(e.currentTarget);
+    });
+
     // GM Group Roll button
     this.element.querySelector('[data-action="openGMGroupRoll"]')?.addEventListener("click", (e) => {
       this._showGMGroupRollMenu(e.currentTarget);
@@ -9020,6 +9779,11 @@ ${paths}  </svg>
     // Reputation button
     this.element.querySelector('[data-action="openReputation"]')?.addEventListener("click", (e) => {
       this._toggleReputationPanel(e.currentTarget);
+    });
+
+    // Random panel button
+    this.element.querySelector('[data-action="openRandomPanel"]')?.addEventListener("click", (e) => {
+      this._toggleRandomPanel(e.currentTarget);
     });
   }
 
@@ -10071,6 +10835,215 @@ ${paths}  </svg>
     if (!this._locked) { this.element.classList.add("cgm-autohide"); }
   }
 
+  /**
+   * Lightweight layout health check — detects if flex gaps have collapsed
+   * and applies a soft fix without full re-render.
+   */
+  _startLayoutHealthMonitor() {
+    if (this._layoutHealthInterval) clearInterval(this._layoutHealthInterval);
+    this._layoutHealthInterval = setInterval(() => {
+      if (!this.element) return;
+      const bar = this.element;
+      const inner = bar.querySelector('.cgm-inner');
+      if (!inner) return;
+
+      // Lightweight check: if gap collapsed, trigger deferred enforcement
+      const innerStyle = window.getComputedStyle(inner);
+      const innerDisplay = innerStyle.display;
+      const innerGap = parseFloat(innerStyle.gap) || 0;
+
+      if (innerDisplay !== 'flex' || innerGap < 8) {
+        console.log('[CGM] Layout health check detected corruption — applying soft fix');
+        this._softFixLayout();
+      }
+
+      // Only do heavy enforcement if sections are unlocked (user may have dragged)
+      // OR if we detect a button count mismatch (injected module buttons)
+      const expected = bar.querySelectorAll('.cgm-section-btn').length;
+      const tracked = this._dynamicButtons.length + 14; // 14 static approx
+      if (this._sectionsUnlocked || Math.abs(expected - tracked) > 2) {
+        requestAnimationFrame(() => {
+          this._discoverDynamicButtons();
+          this._enforceButtonSections();
+        });
+      }
+    }, 10000); // 10s is plenty
+
+    this._setupButtonMutationObserver();
+  }
+
+  /** Watch for newly injected buttons from integrated modules */
+  _setupButtonMutationObserver() {
+    if (this._buttonObserver) { this._buttonObserver.disconnect(); this._buttonObserver = null; }
+    const bar = this.element;
+    if (!bar) return;
+
+    this._buttonObserver = new MutationObserver((mutations) => {
+      if (this._isEnforcingSections) return;
+      if (document.querySelector('.cgm-panel.is-open, .cgm-gm-winmenu-visible, .cgm-gm-tasks-menu')) return;
+
+      let needsEnforce = false;
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches?.('.cgm-section-btn') || node.querySelector?.('.cgm-section-btn')) {
+            needsEnforce = true; break;
+          }
+        }
+        if (needsEnforce) break;
+      }
+      if (needsEnforce) {
+        clearTimeout(this._enforceDebounceTimer);
+        this._enforceDebounceTimer = setTimeout(() => {
+          if (this._isEnforcingSections) return;
+          requestAnimationFrame(() => {
+            this._discoverDynamicButtons();
+            this._enforceButtonSections();
+          });
+        }, 300);
+      }
+    });
+
+    bar.querySelectorAll('.cgm-section-buttons').forEach(container => {
+      this._buttonObserver.observe(container, { childList: true });
+    });
+  }
+
+  _softFixLayout() {
+    if (!this.element) return;
+    const bar = this.element;
+
+    // Re-assert critical flex properties on .cgm-inner
+    const inner = bar.querySelector('.cgm-inner');
+    if (inner) {
+      inner.style.display = 'flex';
+      inner.style.alignItems = 'center';
+      inner.style.gap = '12px';
+    }
+
+    // Re-assert on all sections
+    bar.querySelectorAll('.cgm-section-content').forEach(el => {
+      el.style.display = 'flex';
+      el.style.alignItems = 'center';
+      el.style.gap = '8px';
+    });
+
+    // Re-assert on all button containers
+    bar.querySelectorAll('.cgm-section-buttons').forEach(el => {
+      el.style.display = 'flex';
+      el.style.alignItems = 'center';
+      el.style.gap = '6px';
+    });
+
+    // Sync portrait bg width in case that got out of whack too
+    this._syncPortraitBgWidth();
+  }
+
+  /** Force all section buttons back into their assigned sections */
+  _enforceButtonSections() {
+    if (!this.element || this._isEnforcingSections) return;
+    this._isEnforcingSections = true;
+    try {
+      const bar = this.element;
+      const layout = this._getButtonLayout();
+      const sections = bar.querySelectorAll('.cgm-custom-section');
+      if (!sections.length) return;
+
+      // Build a map of where each button SHOULD be (cache-friendly)
+      const targetSections = new Map();
+      for (const [btnId, cfg] of Object.entries(layout)) {
+        if (btnId.startsWith('_')) continue;
+        targetSections.set(btnId, cfg?.section ?? 0);
+      }
+      this._dynamicButtons.forEach(btnDef => {
+        const cfg = layout[btnDef.id];
+        targetSections.set(btnDef.id, cfg?.section ?? btnDef.defaultSection ?? 0);
+      });
+
+      const misplacedButtons = [];
+      const sectionButtons = new Map();
+
+      // Single pass over all buttons in all sections
+      bar.querySelectorAll('.cgm-section-btn').forEach((btn, idx) => {
+        // Assign ID to orphans
+        if (!btn.dataset.btnId) {
+          const btnId = this._getStableButtonId(btn) || `injected-enforce-${idx}`;
+          btn.dataset.btnId = btnId;
+          const sectionEl = btn.closest('.cgm-custom-section');
+          const secIdx = sectionEl ? [...sections].indexOf(sectionEl) : 1;
+          if (!this._dynamicButtons.some(d => d.id === btnId)) {
+            const iconEl = btn.querySelector('i');
+            const iconClass = iconEl ? [...iconEl.classList].find(c => c.startsWith('fa-')) : 'fa-circle';
+            this._dynamicButtons.push({
+              id: btnId, action: btn.dataset.action || '', icon: iconClass, color: '',
+              title: btn.title || btn.textContent?.trim() || 'Unknown',
+              defaultSection: secIdx >= 0 ? secIdx : 1, isDynamic: true
+            });
+          }
+        }
+
+        const btnId = btn.dataset.btnId;
+        const targetSec = targetSections.get(btnId);
+        if (targetSec === undefined) return;
+
+        const currentSec = btn.closest('.cgm-custom-section');
+        const currentIdx = currentSec ? [...sections].indexOf(currentSec) : -1;
+
+        if (currentIdx !== targetSec && sections[targetSec]) {
+          misplacedButtons.push({ btn, targetSec });
+        } else if (currentIdx >= 0) {
+          if (!sectionButtons.has(currentIdx)) sectionButtons.set(currentIdx, []);
+          sectionButtons.get(currentIdx).push(btn);
+        }
+      });
+
+      // Early exit: nothing to fix
+      if (!misplacedButtons.length) return;
+
+      // Move all misplaced buttons in one go
+      for (const { btn, targetSec } of misplacedButtons) {
+        const targetContainer = sections[targetSec]?.querySelector('.cgm-section-buttons');
+        if (targetContainer) {
+          targetContainer.appendChild(btn);
+          if (!sectionButtons.has(targetSec)) sectionButtons.set(targetSec, []);
+          sectionButtons.get(targetSec).push(btn);
+        }
+      }
+
+      // Restore saved order within each section that received a move
+      const buttonLayout = this._buttonLayout || {};
+      sectionButtons.forEach((buttons, secIdx) => {
+        const container = sections[secIdx]?.querySelector('.cgm-section-buttons');
+        if (!container) return;
+        const savedOrder = buttonLayout[`_order_${secIdx}`];
+        if (!savedOrder || !Array.isArray(savedOrder)) return;
+        const btnMap = new Map();
+        buttons.forEach(b => btnMap.set(b.dataset.btnId, b));
+        savedOrder.forEach(btnId => {
+          const btn = btnMap.get(btnId);
+          if (btn) container.appendChild(btn);
+        });
+      });
+    } finally {
+      this._isEnforcingSections = false;
+    }
+  }
+
+  _stopLayoutHealthMonitor() {
+    if (this._layoutHealthInterval) {
+      clearInterval(this._layoutHealthInterval);
+      this._layoutHealthInterval = null;
+    }
+    if (this._buttonObserver) {
+      this._buttonObserver.disconnect();
+      this._buttonObserver = null;
+    }
+    if (this._enforceDebounceTimer) {
+      clearTimeout(this._enforceDebounceTimer);
+      this._enforceDebounceTimer = null;
+    }
+  }
+
   /* ═══════════════════════════════════════════════════════════
      VALUES PANELS — Cash & Values, Assets, Items
      ═══════════════════════════════════════════════════════════ */
@@ -11071,6 +12044,479 @@ ${paths}  </svg>
     this.refreshTray();
   }
 
+  /* ═══════════════════════════════════════════════════════════════
+     GM TASKS — Sync with player GM Tasks from Cypher Taskbar
+     ═══════════════════════════════════════════════════════════════ */
+
+  /** Aggregate GM tasks from all player-owned actors */
+  _syncGMTasks() {
+    const tasks = [];
+    const pcs = game.actors?.filter(a => a.type === "pc" && a.hasPlayerOwner) || [];
+    for (const actor of pcs) {
+      const actorTasks = actor.getFlag("cypher-taskbar", "gmTasks") || [];
+      for (const task of actorTasks) {
+        tasks.push({
+          ...task,
+          _actorId: actor.id,
+          _actorName: actor.name,
+          _playerName: actor.permission
+            ? Object.entries(actor.permission)
+                .filter(([uid, lvl]) => lvl >= 3 && uid !== "default")
+                .map(([uid]) => game.users?.get(uid)?.name)
+                .filter(Boolean)
+                .join(", ")
+            : ""
+        });
+      }
+    }
+    this._gmTasksData = tasks;
+    this._updateGMTasksButton();
+    // If GM Menu is open, refresh the tasks section
+    if (this._gmMenuEl) {
+      this._renderGMTasksInMenu(this._gmMenuEl);
+    }
+  }
+
+  /** Update the GM Tasks button badge and pulse state */
+  _updateGMTasksButton() {
+    const btn = this.element?.querySelector("#cgm-btn-gm-tasks");
+    const badge = this.element?.querySelector("#cgm-gm-tasks-count");
+    if (!btn) return;
+    const unresolved = this._gmTasksData.filter(t => !t.resolved);
+    const total = unresolved.length;
+    if (badge) {
+      badge.textContent = total > 0 ? String(total) : "";
+      badge.style.display = total > 0 ? "flex" : "none";
+    }
+    if (total > 0) {
+      btn.classList.add("cgm-gm-tasks-pulse");
+    } else {
+      btn.classList.remove("cgm-gm-tasks-pulse");
+    }
+  }
+
+  /** Show the GM Tasks menu panel */
+  _showGMTasksMenu(btnEl) {
+    this._hideGMTasksMenu();
+    this._syncGMTasks();
+
+    const menu = document.createElement("div");
+    menu.id = "cgm-gm-tasks-menu";
+    menu.className = "cgm-gm-winmenu cgm-gm-tasks-winmenu";
+    menu.style.width = "520px";
+    menu.style.minHeight = "420px";
+
+    menu.innerHTML = `
+      <button class="cgm-gm-tasks-close" id="cgm-gm-tasks-menu-close" title="Close"><i class="fas fa-times"></i></button>
+      <div class="cgm-gm-winmenu-header">
+        <i class="fas fa-clipboard-list"></i>
+        <span>GM TASKS</span>
+      </div>
+      <div class="cgm-gm-tasks-tabs">
+        <button class="cgm-gm-tasks-tab active" data-tab="active">ACTIVE</button>
+        <button class="cgm-gm-tasks-tab" data-tab="archived">ARCHIVED</button>
+      </div>
+      <div class="cgm-gm-winmenu-body cgm-gm-tasks-menu-body" id="cgm-gm-tasks-menu-list">
+        <div class="cgm-gm-tasks-menu-empty"><i class="fas fa-check-circle"></i><p>No pending tasks from players.</p></div>
+      </div>
+    `;
+
+    document.body.appendChild(menu);
+    this._gmTasksPanelEl = menu;
+    this._gmTasksTab = "active";
+
+    const rect = btnEl.getBoundingClientRect();
+    requestAnimationFrame(() => {
+      const actualHeight = menu.offsetHeight || 420;
+      const menuLeft = rect.left;
+      const menuTop = rect.top - actualHeight - 4;
+      menu.style.left = `${Math.max(8, menuLeft)}px`;
+      menu.style.top = `${Math.max(8, menuTop)}px`;
+    });
+
+    requestAnimationFrame(() => menu.classList.add("cgm-gm-winmenu-visible"));
+    this._cleanupGMTasksDrag = this._makeMenuDraggable(menu, null, ".cgm-gm-winmenu-header");
+    this._renderGMTasksMenuContent(menu);
+
+    // Tab switching
+    menu.querySelectorAll(".cgm-gm-tasks-tab").forEach(tabBtn => {
+      tabBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        menu.querySelectorAll(".cgm-gm-tasks-tab").forEach(b => b.classList.remove("active"));
+        tabBtn.classList.add("active");
+        this._gmTasksTab = tabBtn.dataset.tab;
+        this._renderGMTasksMenuContent(menu);
+      });
+    });
+
+    // Close button
+    menu.querySelector("#cgm-gm-tasks-menu-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._hideGMTasksMenu();
+    });
+  }
+
+  _hideGMTasksMenu() {
+    if (this._gmTasksPanelEl) {
+      this._cleanupGMTasksDrag?.();
+      this._cleanupGMTasksDrag = null;
+      this._gmTasksPanelEl.classList.remove("cgm-gm-winmenu-visible");
+      setTimeout(() => { this._gmTasksPanelEl?.remove(); this._gmTasksPanelEl = null; }, 200);
+    }
+  }
+
+  /** Render GM tasks list into the menu */
+  _renderGMTasksMenuContent(menu) {
+    const listEl = menu.querySelector("#cgm-gm-tasks-menu-list");
+    if (!listEl) return;
+    const tab = this._gmTasksTab || "active";
+    const tasks = this._gmTasksData.filter(t => tab === "archived" ? t.archived : !t.archived);
+    const esc = foundry.utils.escapeHTML;
+
+    if (tasks.length === 0) {
+      const emptyMsg = tab === "archived"
+        ? "No archived tasks."
+        : "No pending tasks from players.";
+      listEl.innerHTML = `<div class="cgm-gm-tasks-menu-empty"><i class="fas fa-check-circle"></i><p>${emptyMsg}</p></div>`;
+      return;
+    }
+
+    const priorityConfig = {
+      high:   { label: "YESTERDAY", color: "#ff4444", icon: "fa-exclamation-circle" },
+      medium: { label: "NOT SO MUCH", color: "#ffaa00", icon: "fa-clock" },
+      low:    { label: "CAN WAIT", color: "#44cc44", icon: "fa-coffee" }
+    };
+
+    const typeIcons = {
+      message: "fa-comment",
+      reminder: "fa-bell",
+      "generate image": "fa-image",
+      create: "fa-plus-circle",
+      delete: "fa-trash",
+      explain: "fa-question-circle",
+      write: "fa-pen",
+      other: "fa-ellipsis-h"
+    };
+
+    listEl.innerHTML = tasks.map((task, idx) => {
+      const p = priorityConfig[task.priority] || priorityConfig.medium;
+      const tIcon = typeIcons[task.type] || "fa-ellipsis-h";
+      const resolvedClass = task.resolved ? "cgm-gm-task-resolved" : "";
+      const isUnread = !task.opened && !task.archived;
+      const isArchivedTab = tab === "archived";
+      const rowBgClass = isArchivedTab ? "cgm-gm-task-row-archived" : "";
+
+      // NEW label: only show if unread, or if read less than 12 hours ago
+      const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+      const showNew = isUnread || (task.readAt && (Date.now() - task.readAt < TWELVE_HOURS) && !task.archived);
+
+      // Status label: UNREAD (red) → NOTE (yellow) if GM wrote note → READ (green)
+      let statusLabel = "";
+      if (isUnread) {
+        statusLabel = `<span class="cgm-gm-task-label-unread">UNREAD</span>`;
+      } else if (task.gmNote && task.gmNote.trim()) {
+        statusLabel = `<span class="cgm-gm-task-label-note">NOTE</span>`;
+      } else {
+        statusLabel = `<span class="cgm-gm-task-label-read">READ</span>`;
+      }
+
+      const thirdBtn = isArchivedTab
+        ? `<button class="cgm-gm-task-delete" data-delete-idx="${idx}" title="Delete"><i class="fas fa-trash"></i></button>`
+        : `<button class="cgm-gm-task-archive" data-archive-idx="${idx}" title="Archive"><i class="fas fa-archive"></i></button>`;
+      return `
+        <div class="cgm-gm-task-row ${resolvedClass} ${rowBgClass}" data-task-idx="${idx}">
+          ${showNew ? `<div class="cgm-gm-task-label-new">NEW</div>` : ""}
+          <div class="cgm-gm-task-priority" style="--ct-priority-color:${p.color}" title="${p.label}">
+            <i class="fas ${p.icon}"></i>
+          </div>
+          <div class="cgm-gm-task-info">
+            <div class="cgm-gm-task-title">${esc(task.title || "Untitled")}${statusLabel}</div>
+            <div class="cgm-gm-task-sub">
+              <span class="cgm-gm-task-actor"><i class="fas fa-user"></i> ${esc(task._actorName || "")}</span>
+              <span class="cgm-gm-task-type"><i class="fas ${tIcon}"></i> ${esc(task.type || "other")}</span>
+            </div>
+          </div>
+          <div class="cgm-gm-task-controls">
+            <button class="cgm-gm-task-open" data-open-idx="${idx}" title="Open"><i class="fas fa-folder-open"></i></button>
+            <label class="cgm-gm-task-check" title="Resolved">
+              <input type="checkbox" data-resolve-idx="${idx}" ${task.resolved ? "checked" : ""}>
+              <i class="fas fa-check"></i>
+            </label>
+            ${thirdBtn}
+          </div>
+        </div>`;
+    }).join("");
+
+    // Open button
+    listEl.querySelectorAll("[data-open-idx]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.openIdx);
+        const task = this._gmTasksData[idx];
+        if (task) await this._openGMTaskDetail(task);
+      });
+    });
+
+    // Resolve checkbox
+    listEl.querySelectorAll("[data-resolve-idx]").forEach(chk => {
+      chk.addEventListener("change", async (e) => {
+        e.stopPropagation();
+        const idx = parseInt(chk.dataset.resolveIdx);
+        const task = this._gmTasksData[idx];
+        if (!task) return;
+        const actor = game.actors.get(task._actorId);
+        if (!actor) return;
+        const tasks = actor.getFlag("cypher-taskbar", "gmTasks") || [];
+        const localTask = tasks.find(t => t.id === task.id);
+        if (localTask) {
+          localTask.resolved = chk.checked;
+          await actor.setFlag("cypher-taskbar", "gmTasks", tasks);
+        }
+        this._syncGMTasks();
+        if (this._gmTasksPanelEl) this._renderGMTasksMenuContent(this._gmTasksPanelEl);
+      });
+    });
+
+    // Archive button
+    listEl.querySelectorAll("[data-archive-idx]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.archiveIdx);
+        const task = this._gmTasksData[idx];
+        if (!task) return;
+        const actor = game.actors.get(task._actorId);
+        if (!actor) return;
+        const tasks = actor.getFlag("cypher-taskbar", "gmTasks") || [];
+        const localTask = tasks.find(t => t.id === task.id);
+        if (localTask) {
+          localTask.archived = !localTask.archived;
+          await actor.setFlag("cypher-taskbar", "gmTasks", tasks);
+        }
+        this._syncGMTasks();
+        if (this._gmTasksPanelEl) this._renderGMTasksMenuContent(this._gmTasksPanelEl);
+      });
+    });
+
+    // Delete button (archived tab only)
+    listEl.querySelectorAll("[data-delete-idx]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.deleteIdx);
+        const task = this._gmTasksData[idx];
+        if (!task) return;
+        const actor = game.actors.get(task._actorId);
+        if (!actor) return;
+        let tasks = actor.getFlag("cypher-taskbar", "gmTasks") || [];
+        tasks = tasks.filter(t => t.id !== task.id);
+        await actor.setFlag("cypher-taskbar", "gmTasks", tasks);
+        this._syncGMTasks();
+        if (this._gmTasksPanelEl) this._renderGMTasksMenuContent(this._gmTasksPanelEl);
+      });
+    });
+  }
+
+  /** Open task detail window with NOTE field */
+  async _openGMTaskDetail(task) {
+    const existing = document.querySelector("#cgm-gm-task-detail-wrapper");
+    if (existing) existing.remove();
+
+    // Mark task as opened
+    if (!task.opened) {
+      const actor = game.actors.get(task._actorId);
+      if (actor) {
+        const tasks = actor.getFlag("cypher-taskbar", "gmTasks") || [];
+        const localTask = tasks.find(t => t.id === task.id);
+        if (localTask) {
+          localTask.opened = true;
+          localTask.readAt = Date.now();
+          await actor.setFlag("cypher-taskbar", "gmTasks", tasks);
+        }
+      }
+      task.opened = true;
+      task.readAt = Date.now();
+      this._updateGMTasksButton();
+      if (this._gmTasksPanelEl) this._renderGMTasksMenuContent(this._gmTasksPanelEl);
+      if (this._gmMenuEl) this._renderGMTasksInMenu(this._gmMenuEl);
+    }
+
+    const esc = foundry.utils.escapeHTML;
+    const p = {
+      high:   { label: "YESTERDAY", color: "#ff4444", icon: "fa-exclamation-circle" },
+      medium: { label: "NOT SO MUCH", color: "#ffaa00", icon: "fa-clock" },
+      low:    { label: "CAN WAIT", color: "#44cc44", icon: "fa-coffee" }
+    }[task.priority] || { label: "NOT SO MUCH", color: "#ffaa00", icon: "fa-clock" };
+
+    const typeIcons = {
+      message: "fa-comment", reminder: "fa-bell", "generate image": "fa-image",
+      create: "fa-plus-circle", delete: "fa-trash", explain: "fa-question-circle",
+      write: "fa-pen", other: "fa-ellipsis-h"
+    };
+    const tIcon = typeIcons[task.type] || "fa-ellipsis-h";
+
+    const wrapper = document.createElement("div");
+    wrapper.id = "cgm-gm-task-detail-wrapper";
+    wrapper.style.cssText = "position:fixed;z-index:10005;left:50%;top:50%;transform:translate(-50%,-50%);";
+
+    const panel = document.createElement("div");
+    panel.id = "cgm-gm-task-detail";
+    panel.className = "ct-popup cgm-gm-task-detail";
+    panel.style.cssText = "position:relative;width:480px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;";
+
+    panel.innerHTML = `
+      <div class="ct-popup-header">
+        <span style="color:#c8a96e"><i class="fas ${p.icon}" style="color:${p.color}"></i> ${esc(task.title || "Untitled")}</span>
+        <button class="ct-popup-close" id="cgm-gm-task-detail-close" title="Close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="ct-popup-body" style="display:flex;flex-direction:column;gap:12px;overflow-y:auto;">
+        <div class="cgm-gm-task-detail-meta">
+          <span style="color:${p.color}"><i class="fas ${p.icon}"></i> ${p.label}</span>
+          <span><i class="fas ${tIcon}"></i> ${esc(task.type || "other")}</span>
+          <span><i class="fas fa-user"></i> ${esc(task._actorName || "")}</span>
+          <span><i class="fas fa-calendar"></i> ${new Date(task.createdAt).toLocaleString()}</span>
+        </div>
+        <div class="cgm-gm-task-detail-desc">
+          <label>Player Message</label>
+          <div class="cgm-gm-task-detail-desc-box">${esc(task.description || "No description provided.")}</div>
+        </div>
+        <div class="cgm-gm-task-detail-note">
+          <label>GM Note</label>
+          <textarea id="cgm-gm-task-detail-note" rows="5" placeholder="Add a note for the player...">${esc(task.gmNote || "")}</textarea>
+        </div>
+      </div>
+      <div class="ct-popup-actions-row">
+        <button class="ct-popup-btn ct-popup-btn-primary" id="cgm-gm-task-detail-save"><i class="fas fa-save"></i> Save Note</button>
+      </div>
+    `;
+
+    wrapper.appendChild(panel);
+    document.body.appendChild(wrapper);
+    requestAnimationFrame(() => panel.classList.add("is-open"));
+
+    // Draggable header
+    const header = panel.querySelector(".ct-popup-header");
+    let isDragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+    header.style.cursor = "grab";
+    header.addEventListener("mousedown", (e) => {
+      if (e.target.closest("button")) return;
+      isDragging = true;
+      const rect = wrapper.getBoundingClientRect();
+      dragOffsetX = e.clientX - rect.left;
+      dragOffsetY = e.clientY - rect.top;
+      wrapper.style.transform = "none";
+      header.style.cursor = "grabbing";
+    });
+    const onMouseMove = (e) => {
+      if (!isDragging) return;
+      wrapper.style.left = `${e.clientX - dragOffsetX}px`;
+      wrapper.style.top = `${e.clientY - dragOffsetY}px`;
+    };
+    const onMouseUp = () => { isDragging = false; header.style.cursor = "grab"; };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+
+    const _closeDetail = () => {
+      panel.classList.remove("is-open");
+      panel.classList.add("is-closing");
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      panel.addEventListener("transitionend", () => wrapper.remove(), { once: true });
+    };
+
+    panel.querySelector("#cgm-gm-task-detail-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _closeDetail();
+    });
+
+    panel.querySelector("#cgm-gm-task-detail-save")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const note = panel.querySelector("#cgm-gm-task-detail-note").value.trim();
+      const actor = game.actors.get(task._actorId);
+      if (actor) {
+        const tasks = actor.getFlag("cypher-taskbar", "gmTasks") || [];
+        const localTask = tasks.find(t => t.id === task.id);
+        if (localTask) {
+          localTask.gmNote = note;
+          await actor.setFlag("cypher-taskbar", "gmTasks", tasks);
+          ui.notifications.info("GM Note saved.");
+        }
+      }
+      this._syncGMTasks();
+      if (this._gmTasksPanelEl) this._renderGMTasksMenuContent(this._gmTasksPanelEl);
+      if (this._gmMenuEl) this._renderGMTasksInMenu(this._gmMenuEl);
+      _closeDetail();
+    });
+  }
+
+  /** Render GM Tasks section inside the GM Menu (if menu is open) */
+  _renderGMTasksInMenu(menu) {
+    const body = menu.querySelector(".cgm-gm-winmenu-body");
+    if (!body) return;
+    // Remove existing tasks section if present
+    body.querySelector(".cgm-gm-menu-tasks-section")?.remove();
+
+    const tasks = this._gmTasksData.filter(t => !t.resolved);
+    if (tasks.length === 0) return;
+
+    const esc = foundry.utils.escapeHTML;
+    const priorityConfig = {
+      high:   { label: "YESTERDAY", color: "#ff4444", icon: "fa-exclamation-circle" },
+      medium: { label: "NOT SO MUCH", color: "#ffaa00", icon: "fa-clock" },
+      low:    { label: "CAN WAIT", color: "#44cc44", icon: "fa-coffee" }
+    };
+
+    const typeIcons = {
+      message: "fa-comment", reminder: "fa-bell", "generate image": "fa-image",
+      create: "fa-plus-circle", delete: "fa-trash", explain: "fa-question-circle",
+      write: "fa-pen", other: "fa-ellipsis-h"
+    };
+
+    const section = document.createElement("div");
+    section.className = "cgm-gm-menu-tasks-section";
+    section.innerHTML = `
+      <div class="cgm-gm-menu-section-header" style="--sec-color:#3b82f6">
+        <i class="fas fa-clipboard-list"></i>
+        <span>GM TASKS (${tasks.length})</span>
+      </div>
+      <div class="cgm-gm-menu-tasks-list">
+        ${tasks.map((task, idx) => {
+          const p = priorityConfig[task.priority] || priorityConfig.medium;
+          const tIcon = typeIcons[task.type] || "fa-ellipsis-h";
+          // Status label for GM Menu
+          let statusLabel = "";
+          if (!task.opened) {
+            statusLabel = `<span class="cgm-gm-task-label-unread">UNREAD</span>`;
+          } else if (task.gmNote && task.gmNote.trim()) {
+            statusLabel = `<span class="cgm-gm-task-label-note">NOTE</span>`;
+          } else {
+            statusLabel = `<span class="cgm-gm-task-label-read">READ</span>`;
+          }
+          return `
+            <div class="cgm-gm-menu-task-item" data-task-id="${task.id}">
+              <div class="cgm-gm-menu-task-priority" style="color:${p.color}"><i class="fas ${p.icon}"></i></div>
+              <div class="cgm-gm-menu-task-info">
+                <span class="cgm-gm-menu-task-title">${esc(task.title || "Untitled")} ${statusLabel}</span>
+                <span class="cgm-gm-menu-task-actor">${esc(task._actorName || "")}</span>
+              </div>
+              <button class="cgm-gm-menu-task-open" data-open-task="${task.id}" title="Open"><i class="fas fa-folder-open"></i></button>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+    body.insertBefore(section, body.firstChild);
+
+    section.querySelectorAll("[data-open-task]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const taskId = btn.dataset.openTask;
+        const task = this._gmTasksData.find(t => t.id === taskId);
+        if (task) await this._openGMTaskDetail(task);
+      });
+    });
+  }
+
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -11149,6 +12595,7 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "itemsCanvasData", { name: "Items Canvas Data", hint: "Stores Items canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "menuPositions", { name: "Menu Positions", hint: "Saved positions for draggable radial menus (JSON).", scope: "client", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "gmMenuDocs", { name: "GM Menu Documents", hint: "Journal UUIDs stored in GM menu sections (JSON).", scope: "world", config: false, type: String, default: "{\"shared\":[],\"gm\":[],\"notes\":[]}" });
+  game.settings.register(MODULE_ID, "randomPanelData", { name: "Random Panel Data", hint: "Journal entries stored in Random panel grid (JSON array).", scope: "world", config: false, type: String, default: "[]" });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -11215,6 +12662,7 @@ Hooks.once("ready", () => {
     window.cypherGMTaskbar = new GMTaskbar();
     await window.cypherGMTaskbar._migrateSettings();
     window.cypherGMTaskbar.render();
+    window.cypherGMTaskbar._syncGMTasks();
     console.log(`${MODULE_ID} | GM taskbar rendered`);
   }, 500);
 
@@ -11569,6 +13017,7 @@ Hooks.on("ready", () => {
 
       // Show intrusion dialog on player side
       new Dialog({
+        classes: ["cgm-xp-request-dialog"],
         title: ``,
         content: `
           <div class="cgm-intrusion-dialog">
@@ -11606,6 +13055,7 @@ Hooks.on("ready", () => {
               }
 
               new Dialog({
+        classes: ["cgm-xp-request-dialog"],
                 title: ``,
                 content: `
                   <div class="cgm-give-xp-dialog">
@@ -11676,6 +13126,10 @@ Hooks.on("updateActor", (actor, data, options, userId) => {
   // Invalidate party data cache so next read gets fresh data
   if (window.cypherGMTaskbar._partyDataCache) {
     window.cypherGMTaskbar._partyDataCache = null;
+  }
+  // Sync GM tasks if flags changed
+  if (foundry.utils.getProperty(data, "flags.cypher-taskbar.gmTasks") !== undefined) {
+    window.cypherGMTaskbar._syncGMTasks();
   }
   // Debounce: wait for all updates to settle
   clearTimeout(window._cgmRefreshTimer);
