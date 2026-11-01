@@ -39,8 +39,9 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
     this._dragOver = false;
     this._dataLoaded = false;
 
-    // Scene camera state
+    // Scene camera state (this._camera = active tab's camera; per-tab views in this._cameras)
     this._camera = { x: 0, y: 0, zoom: 1 };
+    this._cameras = {};
     this._isPanning = false;
     this._panStart = { x: 0, y: 0 };
     this._cameraStart = { x: 0, y: 0 };
@@ -53,6 +54,17 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
     this._showSearchInput = false;
     this._locked = false;
     this._selectedEnemies = new Set();
+  }
+
+  /* Per-tab camera memory: stash the live camera under the current tab,
+     then adopt the target tab's saved view (default origin/100%). */
+  _cameraFor(tabId) {
+    return this._cameras[tabId] || { x: 0, y: 0, zoom: 1 };
+  }
+
+  _switchTabCamera(newTabId) {
+    this._cameras[this._activeTab] = this._camera;
+    this._camera = { ...this._cameraFor(newTabId) };
   }
 
   toggle() {
@@ -476,7 +488,7 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
     // Tab click
     $html.find(".cgm-canvas-tab").on("click", (e) => {
       const tabId = e.currentTarget.dataset.tabId;
-      if (tabId) { this._activeTab = tabId; this._selectedEnemies.clear(); this.render(); }
+      if (tabId) { this._switchTabCamera(tabId); this._activeTab = tabId; this._selectedEnemies.clear(); this.render(); }
     });
 
     // Tab RIGHT CLICK → Fancy context menu
@@ -679,7 +691,11 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
             this._tabs = this._tabs.filter(t => t.id !== tabId);
             delete this._enemies[tabId];
             delete this._tabSettings[tabId];
-            if (this._activeTab === tabId) this._activeTab = this._tabs[0]?.id || "home";
+            delete this._cameras[tabId];
+            if (this._activeTab === tabId) {
+              this._activeTab = this._tabs[0]?.id || "home";
+              this._camera = { ...this._cameraFor(this._activeTab) };
+            }
             await this._saveToFlags();
             this.render();
           }
@@ -1267,6 +1283,7 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
 
   _resetView() {
     this._camera = { x: 0, y: 0, zoom: 1 };
+    this._cameras[this._activeTab] = this._camera;
     const world = this.element?.querySelector('.cgm-npc-canvas-world');
     this._updateTransform(world);
   }
@@ -1394,64 +1411,55 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
     const portraitModule = game.modules?.get("ginzzzu-portraits");
     const portraitShown = portraitModule?.active && !!foundry.utils.getProperty(actor, "flags.ginzzzu-portraits.portraitShown");
 
-    // Position above the token
     const tokenRect = tokenEl.getBoundingClientRect();
 
     const menu = document.createElement("div");
-    menu.className = "cgm-fancy-ctx-menu cgm-enemy-ctx-menu";
+    menu.className = "cgm-fancy-ctx-menu cgm-ctx-right cgm-ctx-grid cgm-enemy-ctx-menu";
     menu.innerHTML = `
       <div class="cgm-fancy-ctx-header">
         <img src="${actor?.img || 'icons/svg/mystery-man.svg'}" alt="">
         <span>${foundry.utils.escapeHTML(actor?.name || 'NPC')}</span>
       </div>
-      <div class="cgm-fancy-ctx-section">Actions</div>
-      <div class="cgm-fancy-ctx-item" data-action="open-sheet"><i class="fas fa-user-circle"></i> Open Character Sheet</div>
-      <div class="cgm-fancy-ctx-item" data-action="pan-to"><i class="fas fa-crosshairs"></i> Pan to Token</div>
-      <div class="cgm-fancy-ctx-item" data-action="target"><i class="fas fa-bullseye"></i> ${sceneToken?.isTargeted ? 'Untarget' : 'Target'} Token</div>
-      <div class="cgm-fancy-ctx-sep"></div>
-      <div class="cgm-fancy-ctx-section">Combat</div>
-      <div class="cgm-fancy-ctx-item" data-action="toggle-combat"><i class="fas fa-fist-raised"></i> ${inCombat ? 'Remove from Combat' : 'Add to Combat'}</div>
-      <div class="cgm-fancy-ctx-item" data-action="toggle-defeated"><i class="fas fa-skull"></i> ${isDefeated ? 'Mark Healthy' : 'Mark Defeated'}</div>
-      <div class="cgm-fancy-ctx-item" data-action="toggle-visibility"><i class="fas fa-eye"></i> Toggle Visibility</div>
-      <div class="cgm-fancy-ctx-sep"></div>
-      <div class="cgm-fancy-ctx-section">Organization</div>
-      <div class="cgm-fancy-ctx-item" data-action="copy-token"><i class="fas fa-copy"></i> Copy Token</div>
-      <div class="cgm-fancy-ctx-item cgm-fancy-ctx-has-submenu" data-action="move-to-tab">
-        <i class="fas fa-folder-open"></i> Move to Tab <i class="fas fa-chevron-right cgm-fancy-ctx-chevron"></i>
-        <div class="cgm-fancy-ctx-submenu">
-          ${this._tabs.filter(t => t.id !== this._activeTab).map(t => `
-            <div class="cgm-fancy-ctx-subitem" data-tab-id="${t.id}">
-              <i class="fas ${t.icon}"></i> ${foundry.utils.escapeHTML(t.label)}
-            </div>
-          `).join('')}
+      <div class="cgm-fancy-ctx-grid">
+        <div class="cgm-fancy-ctx-item" data-action="open-sheet" title="Open Character Sheet"><i class="fas fa-user-circle"></i><span>Sheet</span></div>
+        <div class="cgm-fancy-ctx-item" data-action="pan-to" title="Pan to Token"><i class="fas fa-crosshairs"></i><span>Pan</span></div>
+        <div class="cgm-fancy-ctx-item" data-action="target" title="Target Token"><i class="fas fa-bullseye"></i><span>${sceneToken?.isTargeted ? 'Untarget' : 'Target'}</span></div>
+        <div class="cgm-fancy-ctx-item" data-action="toggle-combat" title="${inCombat ? 'Remove from Combat' : 'Add to Combat'}"><i class="fas fa-fist-raised"></i><span>${inCombat ? '- Combat' : '+ Combat'}</span></div>
+        <div class="cgm-fancy-ctx-item" data-action="toggle-defeated" title="${isDefeated ? 'Mark Healthy' : 'Mark Defeated'}"><i class="fas fa-skull"></i><span>${isDefeated ? 'Healthy' : 'Defeated'}</span></div>
+        <div class="cgm-fancy-ctx-item" data-action="toggle-visibility" title="Toggle Visibility"><i class="fas fa-eye"></i><span>Visible</span></div>
+        <div class="cgm-fancy-ctx-item" data-action="copy-token" title="Copy Token"><i class="fas fa-copy"></i><span>Copy</span></div>
+        <div class="cgm-fancy-ctx-item cgm-fancy-ctx-has-submenu" data-action="move-to-tab" title="Move to Tab">
+          <i class="fas fa-folder-open"></i><span>Move</span><i class="fas fa-chevron-right cgm-fancy-ctx-chevron"></i>
+          <div class="cgm-fancy-ctx-submenu">
+            ${this._tabs.filter(t => t.id !== this._activeTab).map(t => `
+              <div class="cgm-fancy-ctx-subitem" data-tab-id="${t.id}">
+                <i class="fas ${t.icon}"></i> ${foundry.utils.escapeHTML(t.label)}
+              </div>
+            `).join('')}
+          </div>
         </div>
+        <div class="cgm-fancy-ctx-item cgm-ctx-danger" data-action="delete" title="Remove from Canvas"><i class="fas fa-trash"></i><span>Remove</span></div>
       </div>
-      <div class="cgm-fancy-ctx-sep"></div>
-      <div class="cgm-fancy-ctx-item cgm-ctx-danger" data-action="delete"><i class="fas fa-trash"></i> Remove from Canvas</div>
     `;
     menu.style.cssText = `position:fixed;z-index:99999;`;
     document.body.appendChild(menu);
     this._contextMenu = menu;
 
-    // Smart positioning - keep menu fully within viewport
+    // Position to the right of the token, arrow points left
     requestAnimationFrame(() => {
       const mRect = menu.getBoundingClientRect();
       const pad = 12;
-      let left = tokenRect.left + tokenRect.width / 2 - mRect.width / 2;
-      let top = tokenRect.top - mRect.height - 12;
+      let left = tokenRect.right + 14;
+      let top = tokenRect.top + tokenRect.height / 2 - mRect.height / 2;
 
-      // Horizontal: prefer centered, clamp to edges
-      if (left + mRect.width > window.innerWidth - pad) left = window.innerWidth - mRect.width - pad;
-      if (left < pad) left = pad;
-
-      // Vertical: if above doesn't fit, place below; if below doesn't fit, clamp
-      if (top < pad) {
-        top = tokenRect.bottom + 12;
-        if (top + mRect.height > window.innerHeight - pad) {
-          top = window.innerHeight - mRect.height - pad;
-        }
+      // If right side doesn't fit, flip to left of token
+      if (left + mRect.width > window.innerWidth - pad) {
+        left = tokenRect.left - mRect.width - 14;
+        menu.classList.add("cgm-ctx-left");
+        menu.classList.remove("cgm-ctx-right");
       }
-      // Final safety clamp
+      // Vertical clamp
+      if (top + mRect.height > window.innerHeight - pad) top = window.innerHeight - mRect.height - pad;
       if (top < pad) top = pad;
 
       menu.style.left = left + "px";
@@ -1459,8 +1467,11 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
       menu.classList.add("cgm-ctx-visible");
     });
 
-    // Track mouse for hover glow
+    // Track mouse for ambient glow + per-item hover glow
     menu.addEventListener("mousemove", (e) => {
+      const mRect = menu.getBoundingClientRect();
+      menu.style.setProperty("--gx", (((e.clientX - mRect.left) / mRect.width) * 100) + "%");
+      menu.style.setProperty("--gy", (((e.clientY - mRect.top) / mRect.height) * 100) + "%");
       const item = e.target.closest(".cgm-fancy-ctx-item");
       if (item) {
         const rect = item.getBoundingClientRect();
@@ -1624,11 +1635,13 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
 
   async _saveToFlags() {
     try {
+      this._cameras[this._activeTab] = this._camera;
       await game.settings.set(MODULE_ID, "enemyCanvasData", JSON.stringify({
         tabs: this._tabs,
         npcs: this._enemies,
         activeTab: this._activeTab,
         camera: this._camera,
+        cameras: this._cameras,
         tabSettings: this._tabSettings
       }));
     }
@@ -1644,7 +1657,9 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
       this._enemies = data.npcs || {};
       this._activeTab = data.activeTab || "general";
       this._tabSettings = data.tabSettings || {};
-      if (data.camera) this._camera = data.camera;
+      this._cameras = data.cameras || {};
+      const savedCam = this._cameras[this._activeTab];
+      this._camera = savedCam ? { ...savedCam } : (data.camera ? { ...data.camera } : { x: 0, y: 0, zoom: 1 });
     } catch {}
   }
 
@@ -1652,6 +1667,7 @@ class EnemyCanvas extends foundry.applications.api.ApplicationV2 {
     this._closeContextMenu();
     if (this._isPanning) this._isPanning = false;
     if (this.element) this.element.classList.remove("cgm-fancy-visible");
+    try { this._saveToFlags(); } catch {}
     return super.close(options);
   }
 }

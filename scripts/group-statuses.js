@@ -33,6 +33,9 @@ class GroupStatusesMenu {
     this._hideAttributeMenu();
     this._hideHealthMenu();
     this._hideConfirm();
+    // Safety wipe — every tether is removed even if a menu element was
+    // already gone when its individual hide ran.
+    this._removeAllLines();
   }
 
   /* ═══════════════════════════════════════════════════════════

@@ -1,5 +1,5 @@
 /**
- * Cypher GM Taskbar v4.5.144
+ * Cypher GM Taskbar v4.5.185
  * Foundry VTT v13+ | Cypher System
  *
  * GM-only taskbar with combat tracker, intrusions, cyphers, recovery,
@@ -8,6 +8,115 @@
 
 const MODULE_ID = "cypher-gm-taskbar";
 
+/**
+ * Cypher GM Taskbar — Player Settings menu (ApplicationV2)
+ * Shell window with a submenu sidebar; content provided by
+ * GMTaskbar._getPlayerSettingsSubmenus(). Anchored above the
+ * Player Settings taskbar icon on first paint (no flicker).
+ */
+class PlayerSettingsMenu extends foundry.applications.api.ApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    id: "cgm-player-settings",
+    classes: ["cgm-portraits-dialog-window", "cgm-ps-app"],
+    tag: "div",
+    window: {
+      frame: true,
+      minimizable: false,
+      resizable: false,
+      controls: [],
+      title: "PLAYER SETTINGS"
+    },
+    position: {
+      width: 660,
+      height: 400
+    }
+  };
+
+  constructor(gmTaskbar, options = {}) {
+    super(options);
+    this._gm = gmTaskbar;
+  }
+
+  _renderHTML() {
+    const submenus = this._gm._getPlayerSettingsSubmenus();
+    let lastMenu = "";
+    try { lastMenu = game.settings.get(MODULE_ID, "playerSettingsLastMenu") ?? ""; } catch { /* default to first */ }
+    const activeIndex = Math.max(0, submenus.findIndex(sm => sm.id === lastMenu));
+    return `
+      <div class="cgm-ps-dialog">
+        <div class="cgm-ps-sidebar">
+          ${submenus.map((sm, i) => `
+            <button class="cgm-ps-submenu${i === activeIndex ? " is-active" : ""}" data-ps-submenu="${sm.id}" type="button">
+              <i class="fas ${sm.icon}"></i><span>${sm.label}</span>
+            </button>
+          `).join("")}
+        </div>
+        <div class="cgm-ps-body">
+          ${submenus.map((sm, i) => `
+            <div class="cgm-ps-section${i === activeIndex ? " is-active" : ""}" data-ps-section="${sm.id}">
+              ${sm.render()}
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  _replaceHTML(result, content, options) {
+    if (this.element) {
+      const container = this.element.querySelector('.cgm-ps-dialog');
+      if (container) { container.outerHTML = result; }
+      else { this.element.innerHTML = result; }
+    }
+  }
+
+  _onRender(context, options) {
+    const container = this.element?.querySelector('.cgm-ps-dialog');
+    if (!container) return;
+    const submenus = this._gm._getPlayerSettingsSubmenus();
+
+    // ── Submenu switching ──
+    container.querySelectorAll('.cgm-ps-submenu').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = btn.dataset.psSubmenu;
+        // Remember this submenu as the default for next open (client preference)
+        try { game.settings.set(MODULE_ID, "playerSettingsLastMenu", id); } catch { /* ignore */ }
+        container.querySelectorAll('.cgm-ps-submenu').forEach(b => b.classList.toggle('is-active', b === btn));
+        container.querySelectorAll('.cgm-ps-section').forEach(s => s.classList.toggle('is-active', s.dataset.psSection === id));
+      });
+    });
+
+    // ── Let each submenu bind its own controls ──
+    for (const sm of submenus) {
+      const section = container.querySelector(`.cgm-ps-section[data-ps-section="${sm.id}"]`);
+      if (section && typeof sm.bind === "function") sm.bind(section, () => this.close());
+    }
+
+    // ── Anchor above the Player Settings icon (before first paint — no flicker) ──
+    this._anchorAboveButton();
+  }
+
+  /** Position the window: bottom-left corner above the Player Settings icon.
+      If the bar is docked top, flip below instead so the menu stays on screen. */
+  _anchorAboveButton() {
+    const btn = this._gm.element?.querySelector("#cgm-btn-portraits");
+    if (!btn || !this.element) return;
+    const btnRect = btn.getBoundingClientRect();
+    const winRect = this.element.getBoundingClientRect();
+    const gap = 8;
+    let left = btnRect.left;
+    let top = this._gm._dock === "top" ? btnRect.bottom + gap : btnRect.top - winRect.height - gap;
+    if (left + winRect.width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - winRect.width - 8);
+    if (top < 8) top = 8;
+    if (typeof this.setPosition === "function") this.setPosition({ left, top });
+    else {
+      this.element.style.left = left + "px";
+      this.element.style.top = top + "px";
+    }
+  }
+}
 class GMTaskbar {
   constructor() {
     this.element = null;
@@ -47,6 +156,10 @@ class GMTaskbar {
     this._radialMenuEl = null;
     this._tooltipEl = null;
     this._tooltipTimer = null;
+    // Notes-tooltip timers MUST be separate slots: one shared slot meant a pending
+    // show-timer lost its id to the hide-timer and fired after the cursor left.
+    this._tooltipShowTimer = null;
+    this._tooltipHideTimer = null;
     this._effectTooltipEl = null;
     this._effectTooltipTimer = null;
     this._itemTooltipEl = null;
@@ -64,6 +177,8 @@ class GMTaskbar {
     this._portraitVisibilityMode = this._gs("portraitVisibilityMode", "all");
     this._disconnectedActors = new Set();
     this._disconnectionSounds = new Map(); // actorId -> sound instance
+    this._disconnectionTimes = new Map();  // actorId -> Date.now() when marked disconnected
+    this._fadeTimeouts = new Map();        // actorId -> setTimeout for the 2-min fade
     this._notesLineStart = null;
     this._targetPanelEl = null;
     this._targetPanelPos = null;
@@ -107,6 +222,10 @@ class GMTaskbar {
     this._reputationPanelPos = null;
     this._randomPanelEl = null;
     this._randomPanelPos = null;
+    // Dice tray — roll history + quick dice (mirrors Cypher Taskbar dice bar)
+    this._diceHistory = [];
+    this._diceResultsVisible = this._gs("diceResultsVisible", true);
+    this._diceTrayEl = null;
     this._randomPanelUnlocked = false;
     this._groupStatuses = new GroupStatusesMenu(this);
     // Cypher XP integration
@@ -508,11 +627,53 @@ class GMTaskbar {
 
   }
 
-  /** Open Portraits menu — manage custom portraits for all active actors */
-  async _openPortraitsMenu() {
+  /** Open Player Settings — shell menu with submenus (portraits, ...). Add submenus via _getPlayerSettingsSubmenus() */
+  async _openPlayerSettings() {
+    const submenus = this._getPlayerSettingsSubmenus();
+    if (!submenus.length) {
+      return ui.notifications.warn("Cypher GM Taskbar: no player settings submenus registered.");
+    }
+
+    // Toggle: close if already open
+    if (this._playerSettingsMenu?.rendered) {
+      this._playerSettingsMenu.close();
+      return;
+    }
+
+    this._playerSettingsMenu = new PlayerSettingsMenu(this);
+    await this._playerSettingsMenu.render({ force: true });
+    // Authoritative anchor — runs after core window positioning, before first paint
+    this._playerSettingsMenu._anchorAboveButton();
+  }
+
+
+  /** Player Settings submenu registry — add new submenus here */
+  _getPlayerSettingsSubmenus() {
+    return [
+      { id: "sheet", icon: "fa-id-card", label: "PLAYER SHEET", render: () => this._buildPlayerSheetHTML(), bind: (el, close) => this._bindPlayerSheet(el, close) },
+      { id: "stash", icon: "fa-box-open", label: "PLAYER STASH", render: () => this._buildPlayerStashHTML(), bind: (el, close) => this._bindPlayerStash(el, close) },
+      { id: "cyphers", icon: "fa-flask", label: "CYPHERS/ARTIFACTS", render: () => this._buildCypherLimitsHTML(), bind: (el, close) => this._bindCypherLimits(el, close) },
+      { id: "spellsperday", icon: "fa-hat-wizard", label: "SPELLS PER DAY", render: () => this._buildSpellsPerDayHTML(), bind: (el, close) => this._bindSpellsPerDay(el, close) },
+      { id: "portraits", icon: "fa-portrait", label: "Manage Actor Portraits", render: () => this._buildPortraitsSettingsHTML(), bind: (el, close) => this._bindPortraitsSettings(el, close) },
+      { id: "attacks", icon: "fa-swords", label: "PLAYER ATTACKS", render: () => this._buildPlayerAttacksHTML(), bind: (el, close) => this._bindPlayerAttacks(el, close) },
+    ];
+  }
+
+  /** Mood definitions matching the Cypher Taskbar mood portrait system */
+  get _moodDefs() {
+    return [
+      { key: "combat",       icon: "fa-swords",      label: "Combat" },
+      { key: "exploration",  icon: "fa-map",         label: "Exploration" },
+      { key: "social",       icon: "fa-comments",    label: "Social" },
+      { key: "wounded",      icon: "fa-heart-crack", label: "Wounded" }
+    ];
+  }
+
+  /** Build the Manage Actor Portraits submenu content (actor tabs + panes + footer) */
+  _buildPortraitsSettingsHTML() {
     const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner && a.testUserPermission(game.user, "OWNER"));
     if (!actors.length) {
-      return ui.notifications.warn("Cypher GM Taskbar: no player-owned PCs found.");
+      return `<div class="cgm-ps-empty"><i class="fas fa-user-slash"></i> No player-owned PCs found.</div>`;
     }
 
     // Sort by name
@@ -533,6 +694,9 @@ class GMTaskbar {
       const portraitAnimFrequency = prefs.portraitAnimFrequency ?? 0;
       const portraitAnimLoops = prefs.portraitAnimLoops ?? 0;
       const isVideo = this._isPortraitVideoPath(customPortraitImage);
+
+      // Mood portraits from cypher-taskbar flag
+      const moodPortraits = actor.getFlag("cypher-taskbar", "moodPortraits") ?? {};
 
       // Build file list HTML
       const fileListHtml = portraitFiles.length
@@ -592,6 +756,33 @@ class GMTaskbar {
               </div>
             </div>
 
+            <!-- ★ Mood Portraits -->
+            <div class="cgm-portraits-field cgm-mood-field">
+              <div class="cgm-portraits-section-title"><i class="fas fa-star"></i> Mood Portraits</div>
+              <div class="cgm-mood-grid">
+                ${this._moodDefs.map(m => {
+                  const src = moodPortraits[m.key] ?? "";
+                  const video = this._isPortraitVideoPath(src);
+                  return `
+                    <div class="cgm-mood-slot" data-mood="${m.key}">
+                      <div class="cgm-mood-thumb${src ? "" : " cgm-mood-thumb-empty"}" data-mood-thumb="${m.key}">
+                        ${src
+                          ? (video
+                            ? `<video src="${foundry.utils.escapeHTML(src)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class=\\'fas fa-${m.icon}\\'></i>'"></video>`
+                            : `<img src="${foundry.utils.escapeHTML(src)}" alt="${m.label}" onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class=\\'fas fa-${m.icon}\\'></i>'">`)
+                          : `<i class="fas ${m.icon}"></i>`}
+                      </div>
+                      <div class="cgm-mood-label">${m.label}</div>
+                      <div class="cgm-mood-actions">
+                        <button type="button" class="cgm-mood-browse" data-mood-browse="${m.key}" data-actor-id="${actor.id}" title="Browse for ${m.label} image/webm"><i class="fas fa-folder-open"></i></button>
+                        <button type="button" class="cgm-mood-clear${src ? "" : " cgm-portraits-hidden"}" data-mood-clear="${m.key}" title="Clear ${m.label}"><i class="fas fa-times"></i></button>
+                      </div>
+                    </div>`;
+                }).join("")}
+              </div>
+              <div class="cgm-portraits-file-hint">Mood portraits appear in Cypher Taskbar. Players switch moods via the mood bar below their portrait.</div>
+            </div>
+
             <!-- Animation settings -->
             <div class="cgm-portraits-anim-section${customPortraitEnabled && isVideo ? "" : " cgm-portraits-hidden"}" data-group="animGroup">
               <div class="cgm-portraits-section-title"><i class="fas fa-film"></i> Animation (webm only)</div>
@@ -607,156 +798,193 @@ class GMTaskbar {
       `;
     }
 
-    const content = `
-      <div class="cgm-portraits-dialog">
-        <div class="cgm-portraits-tabs">
-          ${tabsHtml}
-        </div>
-        <div class="cgm-portraits-content">
-          ${panesHtml}
-        </div>
-        <div class="cgm-portraits-footer">
-          <button type="button" class="cgm-portraits-save" data-action="savePortraits"><i class="fas fa-check"></i> Save All Changes</button>
-        </div>
+    return `
+      <div class="cgm-portraits-tabs">
+        ${tabsHtml}
+      </div>
+      <div class="cgm-portraits-content">
+        ${panesHtml}
+      </div>
+      <div class="cgm-portraits-footer">
+        <button type="button" class="cgm-portraits-save" data-action="savePortraits"><i class="fas fa-check"></i> Save All Changes</button>
       </div>
     `;
+  }
 
-    const dlg = new Dialog({
-      title: "Manage Actor Portraits",
-      content: content,
-      buttons: {},
-      render: (html) => {
-        // Handle both jQuery (v10-11) and DOM element (v12+)
-        const $html = html instanceof jQuery ? html : $(html);
-        const container = $html.find('.cgm-portraits-dialog')[0] || $html.filter('.cgm-portraits-dialog')[0];
-        if (!container) {
-          console.warn("[CGM] Portraits dialog: container not found");
-          return;
+  /** Bind Manage Actor Portraits submenu controls */
+  _bindPortraitsSettings(container, closeDialog) {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner && a.testUserPermission(game.user, "OWNER"));
+    if (!actors.length) return;
+
+    // ── Tab switching ──
+    container.querySelectorAll('.cgm-portraits-tab').forEach(tab => {
+      tab.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const actorId = tab.dataset.actorId;
+        container.querySelectorAll('.cgm-portraits-tab').forEach(t => t.classList.remove('is-active'));
+        container.querySelectorAll('.cgm-portraits-pane').forEach(p => p.classList.remove('is-active'));
+        tab.classList.add('is-active');
+        const targetPane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+        if (targetPane) targetPane.classList.add('is-active');
+      });
+    });
+
+    // ── Custom Portrait toggle ──
+    container.querySelectorAll('input[data-field="customPortraitEnabled"]').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const pane = e.target.closest('.cgm-portraits-pane');
+        const group = pane.querySelector('[data-group="customPortraitGroup"]');
+        const pathInput = pane.querySelector('input[data-field="customPortraitImage"]');
+        const preview = pane.querySelector('.cgm-portraits-preview');
+        const animSection = pane.querySelector('[data-group="animGroup"]');
+
+        if (e.target.checked) {
+          group?.classList.remove('cgm-portraits-hidden');
+          if (pathInput?.value) preview?.classList.remove('cgm-portraits-hidden');
+          const isVideo = this._isPortraitVideoPath(pathInput?.value || "");
+          if (isVideo) animSection?.classList.remove('cgm-portraits-hidden');
+        } else {
+          group?.classList.add('cgm-portraits-hidden');
+          preview?.classList.add('cgm-portraits-hidden');
+          animSection?.classList.add('cgm-portraits-hidden');
         }
+      });
+    });
 
-        // ── Tab switching ──
-        container.querySelectorAll('.cgm-portraits-tab').forEach(tab => {
-          tab.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const actorId = tab.dataset.actorId;
-            container.querySelectorAll('.cgm-portraits-tab').forEach(t => t.classList.remove('is-active'));
-            container.querySelectorAll('.cgm-portraits-pane').forEach(p => p.classList.remove('is-active'));
-            tab.classList.add('is-active');
-            const targetPane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
-            if (targetPane) targetPane.classList.add('is-active');
-          });
+    // ── File Container toggle ──
+    container.querySelectorAll('input[data-field="portraitFilesEnabled"]').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const pane = e.target.closest('.cgm-portraits-pane');
+        const group = pane.querySelector('[data-group="portraitFilesGroup"]');
+        if (e.target.checked) {
+          group?.classList.remove('cgm-portraits-hidden');
+        } else {
+          group?.classList.add('cgm-portraits-hidden');
+        }
+      });
+    });
+
+    // ── Path input → preview update ──
+    container.querySelectorAll('input[data-field="customPortraitImage"]').forEach(input => {
+      input.addEventListener('input', (e) => {
+        const pane = e.target.closest('.cgm-portraits-pane');
+        const preview = pane.querySelector('.cgm-portraits-preview');
+        const animSection = pane.querySelector('[data-group="animGroup"]');
+        const path = e.target.value.trim();
+
+        if (path) {
+          preview.classList.remove('cgm-portraits-hidden');
+          const isVideo = this._isPortraitVideoPath(path);
+          preview.innerHTML = isVideo
+            ? `<video src="${foundry.utils.escapeHTML(path)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-portraits-hidden')"></video>`
+            : `<img src="${foundry.utils.escapeHTML(path)}" alt="Preview" onerror="this.parentElement.classList.add('cgm-portraits-hidden')">`;
+          if (isVideo) animSection?.classList.remove('cgm-portraits-hidden');
+          else animSection?.classList.add('cgm-portraits-hidden');
+        } else {
+          preview.classList.add('cgm-portraits-hidden');
+          animSection?.classList.add('cgm-portraits-hidden');
+        }
+      });
+    });
+
+    // ── Range sliders → labels ──
+    container.querySelectorAll('input[type="range"]').forEach(range => {
+      range.addEventListener('input', (e) => {
+        const field = e.target.dataset.field;
+        const val = parseInt(e.target.value);
+        const label = e.target.closest('label')?.querySelector('.cgm-portraits-val-label');
+        if (!label) return;
+        if (field === "portraitAnimFrequency") {
+          label.textContent = val === 0 ? "Always" : val + " min";
+        } else if (field === "portraitAnimLoops") {
+          label.textContent = val === 0 ? "Infinite" : val;
+        }
+      });
+    });
+
+    // ── File browse button ──
+    container.querySelectorAll('[data-browse-portrait]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const actorId = btn.dataset.browsePortrait;
+        const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+        const input = pane?.querySelector('input[data-field="customPortraitImage"]');
+        if (!input) return;
+
+        const fp = new FilePicker({
+          type: "imagevideo",
+          current: input.value || "",
+          callback: (path) => {
+            input.value = path;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
         });
+        await fp.browse();
+      });
+    });
 
-        // ── Custom Portrait toggle ──
-        container.querySelectorAll('input[data-field="customPortraitEnabled"]').forEach(cb => {
-          cb.addEventListener('change', (e) => {
-            const pane = e.target.closest('.cgm-portraits-pane');
-            const group = pane.querySelector('[data-group="customPortraitGroup"]');
-            const pathInput = pane.querySelector('input[data-field="customPortraitImage"]');
-            const preview = pane.querySelector('.cgm-portraits-preview');
-            const animSection = pane.querySelector('[data-group="animGroup"]');
+    // ── Add files button ──
+    container.querySelectorAll('[data-add-files]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const actorId = btn.dataset.addFiles;
+        const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+        const listEl = pane?.querySelector('[data-file-list]');
+        if (!listEl) return;
 
-            if (e.target.checked) {
-              group?.classList.remove('cgm-portraits-hidden');
-              if (pathInput?.value) preview?.classList.remove('cgm-portraits-hidden');
-              const isVideo = this._isPortraitVideoPath(pathInput?.value || "");
-              if (isVideo) animSection?.classList.remove('cgm-portraits-hidden');
-            } else {
-              group?.classList.add('cgm-portraits-hidden');
-              preview?.classList.add('cgm-portraits-hidden');
-              animSection?.classList.add('cgm-portraits-hidden');
-            }
-          });
-        });
+        const fp = new FilePicker({
+          type: "imagevideo",
+          callback: (path) => {
+            // Add to file list in DOM
+            const emptyMsg = listEl.querySelector('.cgm-portraits-file-empty');
+            if (emptyMsg) emptyMsg.remove();
 
-        // ── File Container toggle ──
-        container.querySelectorAll('input[data-field="portraitFilesEnabled"]').forEach(cb => {
-          cb.addEventListener('change', (e) => {
-            const pane = e.target.closest('.cgm-portraits-pane');
-            const group = pane.querySelector('[data-group="portraitFilesGroup"]');
-            if (e.target.checked) {
-              group?.classList.remove('cgm-portraits-hidden');
-            } else {
-              group?.classList.add('cgm-portraits-hidden');
-            }
-          });
-        });
+            const idx = listEl.querySelectorAll('.cgm-portraits-file-item').length;
+            const item = document.createElement('div');
+            item.className = 'cgm-portraits-file-item';
+            item.dataset.fileIdx = idx;
+            item.innerHTML = `
+              <span class="cgm-portraits-file-name" title="${foundry.utils.escapeHTML(path)}">${foundry.utils.escapeHTML(path.split('/').pop())}</span>
+              <button type="button" class="cgm-portraits-file-remove" data-remove-file="${idx}" title="Remove"><i class="fas fa-times"></i></button>
+            `;
+            listEl.appendChild(item);
 
-        // ── Path input → preview update ──
-        container.querySelectorAll('input[data-field="customPortraitImage"]').forEach(input => {
-          input.addEventListener('input', (e) => {
-            const pane = e.target.closest('.cgm-portraits-pane');
-            const preview = pane.querySelector('.cgm-portraits-preview');
-            const animSection = pane.querySelector('[data-group="animGroup"]');
-            const path = e.target.value.trim();
-
-            if (path) {
-              preview.classList.remove('cgm-portraits-hidden');
-              const isVideo = this._isPortraitVideoPath(path);
-              preview.innerHTML = isVideo
-                ? `<video src="${foundry.utils.escapeHTML(path)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-portraits-hidden')"></video>`
-                : `<img src="${foundry.utils.escapeHTML(path)}" alt="Preview" onerror="this.parentElement.classList.add('cgm-portraits-hidden')">`;
-              if (isVideo) animSection?.classList.remove('cgm-portraits-hidden');
-              else animSection?.classList.add('cgm-portraits-hidden');
-            } else {
-              preview.classList.add('cgm-portraits-hidden');
-              animSection?.classList.add('cgm-portraits-hidden');
-            }
-          });
-        });
-
-        // ── Range sliders → labels ──
-        container.querySelectorAll('input[type="range"]').forEach(range => {
-          range.addEventListener('input', (e) => {
-            const field = e.target.dataset.field;
-            const val = parseInt(e.target.value);
-            const label = e.target.closest('label')?.querySelector('.cgm-portraits-val-label');
-            if (!label) return;
-            if (field === "portraitAnimFrequency") {
-              label.textContent = val === 0 ? "Always" : val + " min";
-            } else if (field === "portraitAnimLoops") {
-              label.textContent = val === 0 ? "Infinite" : val;
-            }
-          });
-        });
-
-        // ── File browse button ──
-        container.querySelectorAll('[data-browse-portrait]').forEach(btn => {
-          btn.addEventListener('click', async () => {
-            const actorId = btn.dataset.browsePortrait;
-            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
-            const input = pane?.querySelector('input[data-field="customPortraitImage"]');
-            if (!input) return;
-
-            const fp = new FilePicker({
-              type: "imagevideo",
-              current: input.value || "",
-              callback: (path) => {
-                input.value = path;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
+            // Bind remove on new item
+            item.querySelector('.cgm-portraits-file-remove')?.addEventListener('click', () => {
+              item.remove();
+              if (!listEl.querySelectorAll('.cgm-portraits-file-item').length) {
+                listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
               }
             });
-            await fp.browse();
-          });
+          }
         });
+        await fp.browse();
+      });
+    });
 
-        // ── Add files button ──
-        container.querySelectorAll('[data-add-files]').forEach(btn => {
-          btn.addEventListener('click', async () => {
-            const actorId = btn.dataset.addFiles;
-            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
-            const listEl = pane?.querySelector('[data-file-list]');
-            if (!listEl) return;
+    // ── Add folder button ──
+    container.querySelectorAll('[data-add-folder]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const actorId = btn.dataset.addFolder;
+        const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+        const listEl = pane?.querySelector('[data-file-list]');
+        if (!listEl) return;
 
-            const fp = new FilePicker({
-              type: "imagevideo",
-              callback: (path) => {
-                // Add to file list in DOM
-                const emptyMsg = listEl.querySelector('.cgm-portraits-file-empty');
-                if (emptyMsg) emptyMsg.remove();
+        const fp = new FilePicker({
+          type: "folder",
+          callback: async (folderPath) => {
+            try {
+              const resp = await FilePicker.browse("data", folderPath);
+              const files = resp.files.filter(f => /\.(png|jpg|jpeg|gif|webp|webm)$/i.test(f));
+              if (!files.length) {
+                return ui.notifications.warn("No image or webm files found in selected folder.");
+              }
 
-                const idx = listEl.querySelectorAll('.cgm-portraits-file-item').length;
+              const emptyMsg = listEl.querySelector('.cgm-portraits-file-empty');
+              if (emptyMsg) emptyMsg.remove();
+
+              let startIdx = listEl.querySelectorAll('.cgm-portraits-file-item').length;
+              for (const path of files) {
+                const idx = startIdx++;
                 const item = document.createElement('div');
                 item.className = 'cgm-portraits-file-item';
                 item.dataset.fileIdx = idx;
@@ -766,7 +994,6 @@ class GMTaskbar {
                 `;
                 listEl.appendChild(item);
 
-                // Bind remove on new item
                 item.querySelector('.cgm-portraits-file-remove')?.addEventListener('click', () => {
                   item.remove();
                   if (!listEl.querySelectorAll('.cgm-portraits-file-item').length) {
@@ -774,136 +1001,895 @@ class GMTaskbar {
                   }
                 });
               }
-            });
-            await fp.browse();
-          });
-        });
 
-        // ── Add folder button ──
-        container.querySelectorAll('[data-add-folder]').forEach(btn => {
-          btn.addEventListener('click', async () => {
-            const actorId = btn.dataset.addFolder;
-            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
-            const listEl = pane?.querySelector('[data-file-list]');
-            if (!listEl) return;
-
-            const fp = new FilePicker({
-              type: "folder",
-              callback: async (folderPath) => {
-                try {
-                  const resp = await FilePicker.browse("data", folderPath);
-                  const files = resp.files.filter(f => /\.(png|jpg|jpeg|gif|webp|webm)$/i.test(f));
-                  if (!files.length) {
-                    return ui.notifications.warn("No image or webm files found in selected folder.");
-                  }
-
-                  const emptyMsg = listEl.querySelector('.cgm-portraits-file-empty');
-                  if (emptyMsg) emptyMsg.remove();
-
-                  let startIdx = listEl.querySelectorAll('.cgm-portraits-file-item').length;
-                  for (const path of files) {
-                    const idx = startIdx++;
-                    const item = document.createElement('div');
-                    item.className = 'cgm-portraits-file-item';
-                    item.dataset.fileIdx = idx;
-                    item.innerHTML = `
-                      <span class="cgm-portraits-file-name" title="${foundry.utils.escapeHTML(path)}">${foundry.utils.escapeHTML(path.split('/').pop())}</span>
-                      <button type="button" class="cgm-portraits-file-remove" data-remove-file="${idx}" title="Remove"><i class="fas fa-times"></i></button>
-                    `;
-                    listEl.appendChild(item);
-
-                    item.querySelector('.cgm-portraits-file-remove')?.addEventListener('click', () => {
-                      item.remove();
-                      if (!listEl.querySelectorAll('.cgm-portraits-file-item').length) {
-                        listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
-                      }
-                    });
-                  }
-
-                  ui.notifications.info(`Added ${files.length} file(s) from folder.`);
-                } catch (err) {
-                  console.error("[CGM] Failed to browse folder:", err);
-                  ui.notifications.error("Failed to read folder contents.");
-                }
-              }
-            });
-            await fp.browse();
-          });
-        });
-
-        // ── Clear files button ──
-        container.querySelectorAll('[data-clear-files]').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const actorId = btn.dataset.clearFiles;
-            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
-            const listEl = pane?.querySelector('[data-file-list]');
-            if (listEl) {
-              listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
-            }
-          });
-        });
-
-        // ── Bind remove on existing file items ──
-        container.querySelectorAll('.cgm-portraits-file-remove').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const item = btn.closest('.cgm-portraits-file-item');
-            const listEl = item?.parentElement;
-            item?.remove();
-            if (listEl && !listEl.querySelectorAll('.cgm-portraits-file-item').length) {
-              listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
-            }
-          });
-        });
-
-        // ── Save button ──
-        container.querySelector('[data-action="savePortraits"]')?.addEventListener('click', async () => {
-          let saved = 0;
-          for (const actor of actors) {
-            const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actor.id}"]`);
-            if (!pane) continue;
-
-            const prefs = { ...(actor.getFlag("cypher-taskbar", "taskbarPrefs") ?? {}) };
-
-            const customPortraitEnabled = pane.querySelector('input[data-field="customPortraitEnabled"]')?.checked ?? false;
-            const portraitFilesEnabled = pane.querySelector('input[data-field="portraitFilesEnabled"]')?.checked ?? false;
-            const customPortraitImage = pane.querySelector('input[data-field="customPortraitImage"]')?.value?.trim() || "";
-            const portraitAnimFrequency = parseInt(pane.querySelector('input[data-field="portraitAnimFrequency"]')?.value ?? "0");
-            const portraitAnimLoops = parseInt(pane.querySelector('input[data-field="portraitAnimLoops"]')?.value ?? "0");
-
-            // Collect file list from DOM
-            const fileItems = pane.querySelectorAll('[data-file-list] .cgm-portraits-file-item');
-            const portraitFiles = Array.from(fileItems).map(item => {
-              const titleEl = item.querySelector('.cgm-portraits-file-name');
-              return titleEl?.title || "";
-            }).filter(Boolean);
-
-            prefs.customPortraitEnabled = customPortraitEnabled;
-            prefs.portraitFilesEnabled = portraitFilesEnabled;
-            if (customPortraitImage) prefs.customPortraitImage = customPortraitImage;
-            else delete prefs.customPortraitImage;
-            prefs.portraitAnimFrequency = portraitAnimFrequency;
-            prefs.portraitAnimLoops = portraitAnimLoops;
-            if (portraitFiles.length) prefs.portraitFiles = portraitFiles;
-            else delete prefs.portraitFiles;
-
-            try {
-              await actor.setFlag("cypher-taskbar", "taskbarPrefs", prefs);
-              saved++;
+              ui.notifications.info(`Added ${files.length} file(s) from folder.`);
             } catch (err) {
-              console.error(`[CGM] Failed to save portrait settings for ${actor.name}:`, err);
+              console.error("[CGM] Failed to browse folder:", err);
+              ui.notifications.error("Failed to read folder contents.");
             }
           }
-
-          ui.notifications.info(`Cypher GM Taskbar: portrait settings saved for ${saved} actor(s).`);
-          dlg.close();
         });
-      }
-    }, {
-      width: 520,
-      classes: ["cgm-portraits-dialog-window"]
+        await fp.browse();
+      });
     });
 
-    dlg.render(true);
+    // ── Clear files button ──
+    container.querySelectorAll('[data-clear-files]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const actorId = btn.dataset.clearFiles;
+        const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+        const listEl = pane?.querySelector('[data-file-list]');
+        if (listEl) {
+          listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
+        }
+      });
+    });
+
+    // ── Bind remove on existing file items ──
+    container.querySelectorAll('.cgm-portraits-file-remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const item = btn.closest('.cgm-portraits-file-item');
+        const listEl = item?.parentElement;
+        item?.remove();
+        if (listEl && !listEl.querySelectorAll('.cgm-portraits-file-item').length) {
+          listEl.innerHTML = `<div class="cgm-portraits-file-empty">No files in container yet.</div>`;
+        }
+      });
+    });
+
+    // ── Mood portrait browse buttons ──
+    container.querySelectorAll('[data-mood-browse]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const moodKey = btn.dataset.moodBrowse;
+        const actorId = btn.dataset.actorId;
+        const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
+        if (!pane) return;
+        const slot = pane.querySelector(`.cgm-mood-slot[data-mood="${moodKey}"]`);
+        const thumb = slot?.querySelector('[data-mood-thumb]');
+        const clearBtn = slot?.querySelector('[data-mood-clear]');
+        const moodDef = this._moodDefs.find(m => m.key === moodKey);
+
+        const fp = new FilePicker({
+          type: "imagevideo",
+          callback: (path) => {
+            if (!path || !thumb) return;
+            thumb.classList.remove('cgm-mood-thumb-empty');
+            const isVideo = this._isPortraitVideoPath(path);
+            thumb.innerHTML = isVideo
+              ? `<video src="${foundry.utils.escapeHTML(path)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class="fas ${moodDef?.icon ?? 'fa-image'}"></i>'"></video>`
+              : `<img src="${foundry.utils.escapeHTML(path)}" alt="${moodDef?.label ?? ''}" onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class="fas ${moodDef?.icon ?? 'fa-image'}"></i>'">`;
+            clearBtn?.classList.remove('cgm-portraits-hidden');
+          }
+        });
+        await fp.browse();
+      });
+    });
+
+    // ── Mood portrait clear buttons ──
+    container.querySelectorAll('[data-mood-clear]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const moodKey = btn.dataset.moodClear;
+        const slot = btn.closest('.cgm-mood-slot');
+        const thumb = slot?.querySelector('[data-mood-thumb]');
+        const moodDef = this._moodDefs.find(m => m.key === moodKey);
+        if (thumb) {
+          thumb.classList.add('cgm-mood-thumb-empty');
+          thumb.innerHTML = `<i class="fas ${moodDef?.icon ?? 'fa-image'}"></i>`;
+        }
+        btn.classList.add('cgm-portraits-hidden');
+      });
+    });
+
+    // ── Save button ──
+    container.querySelector('[data-action="savePortraits"]')?.addEventListener('click', async () => {
+      let saved = 0;
+      for (const actor of actors) {
+        const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actor.id}"]`);
+        if (!pane) continue;
+
+        const prefs = { ...(actor.getFlag("cypher-taskbar", "taskbarPrefs") ?? {}) };
+
+        const customPortraitEnabled = pane.querySelector('input[data-field="customPortraitEnabled"]')?.checked ?? false;
+        const portraitFilesEnabled = pane.querySelector('input[data-field="portraitFilesEnabled"]')?.checked ?? false;
+        const customPortraitImage = pane.querySelector('input[data-field="customPortraitImage"]')?.value?.trim() || "";
+        const portraitAnimFrequency = parseInt(pane.querySelector('input[data-field="portraitAnimFrequency"]')?.value ?? "0");
+        const portraitAnimLoops = parseInt(pane.querySelector('input[data-field="portraitAnimLoops"]')?.value ?? "0");
+
+        // Collect file list from DOM
+        const fileItems = pane.querySelectorAll('[data-file-list] .cgm-portraits-file-item');
+        const portraitFiles = Array.from(fileItems).map(item => {
+          const titleEl = item.querySelector('.cgm-portraits-file-name');
+          return titleEl?.title || "";
+        }).filter(Boolean);
+
+        prefs.customPortraitEnabled = customPortraitEnabled;
+        prefs.portraitFilesEnabled = portraitFilesEnabled;
+        if (customPortraitImage) prefs.customPortraitImage = customPortraitImage;
+        else delete prefs.customPortraitImage;
+        prefs.portraitAnimFrequency = portraitAnimFrequency;
+        prefs.portraitAnimLoops = portraitAnimLoops;
+        if (portraitFiles.length) prefs.portraitFiles = portraitFiles;
+        else delete prefs.portraitFiles;
+
+        try {
+          await actor.setFlag("cypher-taskbar", "taskbarPrefs", prefs);
+
+          // Save mood portraits to the cypher-taskbar moodPortraits flag
+          const moodSlots = pane.querySelectorAll('.cgm-mood-slot');
+          const moodPortraits = {};
+          moodSlots.forEach(slot => {
+            const key = slot.dataset.mood;
+            const thumb = slot.querySelector('[data-mood-thumb]');
+            const media = thumb?.querySelector('img, video');
+            const src = media?.getAttribute('src') || '';
+            if (src) moodPortraits[key] = src;
+          });
+          const existingMoodPortraits = actor.getFlag("cypher-taskbar", "moodPortraits") ?? {};
+          const hasAny = Object.keys(moodPortraits).length > 0;
+          const hadAny = Object.keys(existingMoodPortraits).length > 0;
+          if (hasAny) {
+            await actor.setFlag("cypher-taskbar", "moodPortraits", moodPortraits);
+          } else if (hadAny) {
+            await actor.unsetFlag("cypher-taskbar", "moodPortraits");
+          }
+
+          saved++;
+        } catch (err) {
+          console.error(`[CGM] Failed to save portrait settings for ${actor.name}:`, err);
+        }
+      }
+
+      ui.notifications.info(`Cypher GM Taskbar: portrait settings saved for ${saved} actor(s).`);
+      if (typeof closeDialog === "function") closeDialog();
+    });
+  }
+
+  /* ──────────────────────────────────────────────────────────────
+     PLAYER ATTACKS submenu — per-actor drop zones that pin attack
+     items into the Cypher Taskbar Combat Menu → ATTACKS section
+     (actor flag "cypher-taskbar".pinnedAttacks)
+     ────────────────────────────────────────────────────────────── */
+
+  /** Build the PLAYER ATTACKS submenu content (actor tabs + drop zones) */
+  _buildPlayerAttacksHTML() {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner && a.testUserPermission(game.user, "OWNER"));
+    if (!actors.length) {
+      return `<div class="cgm-ps-empty"><i class="fas fa-user-slash"></i> No player-owned PCs found.</div>`;
+    }
+    actors.sort((a, b) => a.name.localeCompare(b.name));
+
+    let tabsHtml = "";
+    let panesHtml = "";
+
+    for (let i = 0; i < actors.length; i++) {
+      const actor = actors[i];
+      const isActive = i === 0 ? " is-active" : "";
+      tabsHtml += `
+        <button class="cgm-portraits-tab${isActive}" data-actor-id="${actor.id}" type="button">
+          <img src="${actor.img || "icons/svg/mystery-man.svg"}" alt="${actor.name}">
+          <span>${actor.name}</span>
+        </button>
+      `;
+      panesHtml += `
+        <div class="cgm-portraits-pane${isActive}" data-actor-id="${actor.id}">
+          <div class="cgm-pa-dropzone" data-dropzone="${actor.id}">
+            <i class="fas fa-arrow-down-to-line"></i>
+            <span>Drop attack items here</span>
+          </div>
+          <div class="cgm-pa-list" data-attack-list>
+            ${this._buildPlayerAttackChips(actor)}
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="cgm-portraits-tabs">
+        ${tabsHtml}
+      </div>
+      <div class="cgm-portraits-content">
+        ${panesHtml}
+      </div>
+    `;
+  }
+
+  /** Current pinned attacks of an actor as chip HTML */
+  _buildPlayerAttackChips(actor) {
+    const pinnedIds = actor.getFlag("cypher-taskbar", "pinnedAttacks") ?? [];
+    const items = pinnedIds.map(id => actor.items.get(id)).filter(i => i && i.type === "attack");
+    if (!items.length) {
+      return `<div class="cgm-pa-empty">No attacks pinned for ${foundry.utils.escapeHTML(actor.name)} yet.</div>`;
+    }
+    return items.map(item => `
+      <div class="cgm-pa-chip" data-item-id="${item.id}">
+        <img src="${item.img || "icons/svg/sword.svg"}" alt="">
+        <span class="cgm-pa-chip-name">${foundry.utils.escapeHTML(item.name)}</span>
+        <button type="button" class="cgm-pa-chip-remove" data-unpin="${item.id}" title="Remove from Combat Menu"><i class="fas fa-times"></i></button>
+      </div>
+    `).join("");
+  }
+
+  /** Bind PLAYER ATTACKS submenu controls (tabs, drop zones, unpin) */
+  _bindPlayerAttacks(container) {
+    // ── Tab switching ──
+    container.querySelectorAll('.cgm-portraits-tab').forEach(tab => {
+      tab.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const actorId = tab.dataset.actorId;
+        container.querySelectorAll('.cgm-portraits-tab').forEach(t => t.classList.remove('is-active'));
+        container.querySelectorAll('.cgm-portraits-pane').forEach(p => p.classList.remove('is-active'));
+        tab.classList.add('is-active');
+        container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`)?.classList.add('is-active');
+      });
+    });
+
+    // ── Unpin buttons (delegated — chips are re-rendered on drop) ──
+    container.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.cgm-pa-chip-remove');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const pane = btn.closest('.cgm-portraits-pane');
+      const actor = game.actors.get(pane?.dataset.actorId);
+      if (!actor) return;
+      const ids = (actor.getFlag("cypher-taskbar", "pinnedAttacks") ?? []).filter(x => x !== btn.dataset.unpin);
+      await actor.setFlag("cypher-taskbar", "pinnedAttacks", ids);
+      btn.closest('.cgm-pa-chip')?.remove();
+      this._syncPlayerAttackList(actor, pane);
+    });
+
+    // ── Drop zones ──
+    container.querySelectorAll('[data-dropzone]').forEach(dz => {
+      dz.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dz.classList.add('cgm-pa-dropzone-over');
+      });
+      dz.addEventListener('dragleave', () => dz.classList.remove('cgm-pa-dropzone-over'));
+      dz.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dz.classList.remove('cgm-pa-dropzone-over');
+
+        const actor = game.actors.get(dz.dataset.dropzone);
+        if (!actor) return;
+
+        let data = null;
+        try { data = JSON.parse(e.dataTransfer.getData("text/plain")); } catch { /* ignore */ }
+        if (!data || data.type !== "Item") return;
+
+        // Resolve the dropped item (world item, actor item, or compendium)
+        let item = null;
+        if (data.uuid) {
+          try { item = await fromUuid(data.uuid); } catch { /* ignore */ }
+        }
+        if (!item && data.id) item = game.items.get(data.id);
+        if (!item || item.type !== "attack") {
+          ui.notifications.warn("Only attack items can be dropped here.");
+          return;
+        }
+
+        // Ensure the attack exists on the actor's sheet (copy if dropped from elsewhere)
+        let actorItem = actor.items.get(item.id);
+        if (!actorItem) {
+          try {
+            const created = await actor.createEmbeddedDocuments("Item", [item.toObject()]);
+            actorItem = created?.[0] ?? null;
+          } catch (err) {
+            console.error("[CGM] Failed to add attack to actor:", err);
+            ui.notifications.error(`Failed to add ${item.name} to ${actor.name}.`);
+            return;
+          }
+        }
+        if (!actorItem) return;
+
+        // Pin into the Cypher Taskbar Combat Menu → ATTACKS
+        const ids = actor.getFlag("cypher-taskbar", "pinnedAttacks") ?? [];
+        if (!ids.includes(actorItem.id)) {
+          ids.push(actorItem.id);
+          await actor.setFlag("cypher-taskbar", "pinnedAttacks", ids);
+        }
+
+        ui.notifications.info(`${actorItem.name} pinned to ${actor.name}'s Combat Menu.`);
+        const pane = dz.closest('.cgm-portraits-pane');
+        this._syncPlayerAttackList(actor, pane);
+      });
+    });
+  }
+
+  /** Re-render the attack chip list inside a PLAYER ATTACKS pane */
+  _syncPlayerAttackList(actor, pane) {
+    const listEl = pane?.querySelector('[data-attack-list]');
+    if (!listEl) return;
+    listEl.innerHTML = this._buildPlayerAttackChips(actor);
+  }
+
+  /* ── PLAYER STASH: link an Item Piles container as the shared stash ── */
+
+  /** Current stash setting ({ uuid } or {}) */
+  _getPlayerStash() {
+    try { return game.settings.get(MODULE_ID, "playerStash") || {}; } catch { return {}; }
+  }
+
+  /** Sync-resolve a stash UUID to a document (world actors + scene tokens).
+      Compendium or cross-world references return null — handled as broken. */
+  _resolveStashDocSync(uuid) {
+    if (!uuid || typeof uuid !== "string") return null;
+    const actorMatch = /^Actor\.([^.]+)$/.exec(uuid);
+    if (actorMatch) return game.actors.get(actorMatch[1]) ?? null;
+    const tokenMatch = /^Scene\.([^.]+)\.Token\.([^.]+)$/.exec(uuid);
+    if (tokenMatch) return game.scenes.get(tokenMatch[1])?.tokens?.get(tokenMatch[2]) ?? null;
+    return null;
+  }
+
+  /** Get uploaded player sheets map: { [actorId]: { html, name, uploadedAt } } */
+  _getPlayerSheets() {
+    try {
+      return JSON.parse(game.settings.get(MODULE_ID, "playerSheets") || "{}");
+    } catch { return {}; }
+  }
+
+  /** Save player sheets map */
+  async _savePlayerSheets(data) {
+    await game.settings.set(MODULE_ID, "playerSheets", JSON.stringify(data));
+  }
+
+  /** Build the PLAYER SHEET submenu content — per-actor tabs with HTML upload */
+  _buildPlayerSheetHTML() {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
+    if (!actors.length) {
+      return `<div class="cgm-ps-empty"><i class="fas fa-user-slash"></i> No player-owned PCs found.</div>`;
+    }
+    actors.sort((a, b) => a.name.localeCompare(b.name));
+    const sheets = this._getPlayerSheets();
+
+    let tabsHtml = "";
+    let panesHtml = "";
+
+    for (let i = 0; i < actors.length; i++) {
+      const actor = actors[i];
+      const isActive = i === 0 ? " is-active" : "";
+      const sheet = sheets[actor.id];
+      const hasSheet = !!sheet?.html;
+      const sheetName = sheet?.name || "";
+      const uploadedAt = sheet?.uploadedAt ? new Date(sheet.uploadedAt).toLocaleString() : "";
+      const htmlSize = sheet?.html ? (new TextEncoder().encode(sheet.html).length / 1024).toFixed(1) : "0";
+
+      tabsHtml += `
+        <button class="cgm-portraits-tab${isActive}" data-actor-id="${actor.id}" type="button">
+          <img src="${actor.img || "icons/svg/mystery-man.svg"}" alt="${actor.name}">
+          <span>${actor.name}</span>
+        </button>`;
+
+      panesHtml += `
+        <div class="cgm-portraits-pane${isActive}" data-actor-id="${actor.id}">
+          <div class="cgm-ps-sheet-area" data-actor-id="${actor.id}">
+            ${hasSheet ? `
+              <div class="cgm-ps-sheet-info">
+                <div class="cgm-ps-sheet-icon"><i class="fas fa-file-code"></i></div>
+                <div class="cgm-ps-sheet-meta">
+                  <div class="cgm-ps-sheet-name">${foundry.utils.escapeHTML(sheetName)}</div>
+                  <div class="cgm-ps-sheet-detail">${htmlSize} KB · uploaded ${uploadedAt}</div>
+                </div>
+                <div class="cgm-ps-sheet-actions">
+                  <button type="button" class="cgm-ps-sheet-btn cgm-ps-sheet-view" data-view-sheet="${actor.id}" title="Preview sheet"><i class="fas fa-eye"></i></button>
+                  <button type="button" class="cgm-ps-sheet-btn cgm-ps-sheet-delete" data-delete-sheet="${actor.id}" title="Remove sheet"><i class="fas fa-trash"></i></button>
+                </div>
+              </div>
+            ` : `
+              <div class="cgm-ps-sheet-empty">
+                <i class="fas fa-cloud-upload-alt"></i>
+                <div class="cgm-ps-sheet-empty-text">No sheet uploaded</div>
+                <div class="cgm-ps-sheet-empty-hint">Upload an HTML character sheet for ${foundry.utils.escapeHTML(actor.name)}</div>
+              </div>
+            `}
+            <div class="cgm-ps-sheet-upload-row">
+              <input type="file" accept=".html,.htm" class="cgm-ps-sheet-file-input" data-sheet-input="${actor.id}" style="display:none;">
+              <button type="button" class="cgm-ps-sheet-upload-btn" data-upload-sheet="${actor.id}">
+                <i class="fas fa-upload"></i> ${hasSheet ? "Replace Sheet" : "Upload Sheet"}
+              </button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    return `
+      <div class="cgm-portraits-tabs" data-role="sheet-tabs">
+        ${tabsHtml}
+      </div>
+      <div class="cgm-portraits-panes" data-role="sheet-panes">
+        ${panesHtml}
+      </div>`;
+  }
+
+  /** Bind events for the PLAYER SHEET submenu */
+  _bindPlayerSheet(container) {
+    // Actor tab switching
+    container.querySelectorAll(".cgm-portraits-tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        container.querySelectorAll(".cgm-portraits-tab").forEach(t => t.classList.remove("is-active"));
+        container.querySelectorAll(".cgm-portraits-pane").forEach(p => p.classList.remove("is-active"));
+        tab.classList.add("is-active");
+        container.querySelector(`.cgm-portraits-pane[data-actor-id="${tab.dataset.actorId}"]`)?.classList.add("is-active");
+      });
+    });
+
+    // Upload button → trigger hidden file input
+    container.querySelectorAll("[data-upload-sheet]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const actorId = btn.dataset.uploadSheet;
+        container.querySelector(`[data-sheet-input="${actorId}"]`)?.click();
+      });
+    });
+
+    // File input change → read HTML → store
+    container.querySelectorAll("[data-sheet-input]").forEach(input => {
+      input.addEventListener("change", async () => {
+        const actorId = input.dataset.sheetInput;
+        const file = input.files?.[0];
+        if (!file) return;
+
+        // Validate type
+        if (!file.name.match(/\.html?$/i)) {
+          ui.notifications.warn("Please select an .html or .htm file.");
+          return;
+        }
+
+        // Size check — warn over 500KB
+        if (file.size > 500 * 1024) {
+          ui.notifications.warn(`File is ${(file.size / 1024).toFixed(0)}KB — large sheets may slow down the game. Consider optimizing.`);
+        }
+
+        try {
+          const text = await file.text();
+          const sheets = this._getPlayerSheets();
+          sheets[actorId] = {
+            html: text,
+            name: file.name,
+            uploadedAt: Date.now()
+          };
+          await this._savePlayerSheets(sheets);
+          ui.notifications.info(`Sheet uploaded for ${game.actors.get(actorId)?.name ?? "actor"}.`);
+
+          // Refresh the player settings menu
+          const menu = this._playerSettingsMenu;
+          if (menu?.rendered) { await menu.render({ force: true }); menu._anchorAboveButton(); }
+        } catch (err) {
+          console.error(`${MODULE_ID} | Sheet upload failed:`, err);
+          ui.notifications.error("Failed to upload sheet.");
+        }
+      });
+    });
+
+    // View / preview sheet
+    container.querySelectorAll("[data-view-sheet]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const actorId = btn.dataset.viewSheet;
+        const sheet = this._getPlayerSheets()[actorId];
+        if (!sheet?.html) return;
+        // Open preview in a new window/tab via blob
+        const blob = new Blob([sheet.html], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        window.open(url, "_blank");
+        // Clean up the object URL after a delay
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      });
+    });
+
+    // Delete sheet
+    container.querySelectorAll("[data-delete-sheet]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const actorId = btn.dataset.deleteSheet;
+        const actorName = game.actors.get(actorId)?.name ?? "actor";
+        const confirmed = await foundry.applications.api.DialogV2.confirm({
+          window: { title: "Remove Sheet" },
+          content: `<p>Remove the uploaded sheet for <strong>${foundry.utils.escapeHTML(actorName)}</strong>?</p>`,
+          rejectButton: "Cancel",
+          modal: true
+        });
+        if (!confirmed) return;
+
+        const sheets = this._getPlayerSheets();
+        delete sheets[actorId];
+        await this._savePlayerSheets(sheets);
+        ui.notifications.info(`Sheet removed for ${actorName}.`);
+
+        // Refresh the player settings menu
+        const menu = this._playerSettingsMenu;
+        if (menu?.rendered) { await menu.render({ force: true }); menu._anchorAboveButton(); }
+      });
+    });
+  }
+
+  /** Build the PLAYER STASH submenu content (drop zone + linked pile card) */
+  _buildPlayerStashHTML() {
+    if (!game.modules.get("item-piles")?.active) {
+      return `<div class="cgm-ps-empty"><i class="fas fa-plug-circle-xmark"></i> The <strong>Item Piles</strong> module is not active — enable it to use the Player Stash.</div>`;
+    }
+
+    const stash = this._getPlayerStash();
+    const doc = this._resolveStashDocSync(stash.uuid);
+
+    const dropzone = `
+      <div class="cgm-stash-dropzone${doc ? " cgm-stash-dropzone-compact" : ""}" data-stash-dropzone>
+        <i class="fas fa-box-open"></i>
+        <span>${doc ? "Drop a different container to replace the stash" : "Drag an Item Piles container here"}</span>
+      </div>`;
+
+    let cardHtml = "";
+    if (stash.uuid && !doc) {
+      cardHtml = `<div class="cgm-stash-missing"><i class="fas fa-triangle-exclamation"></i> The linked stash container no longer exists. Drop a new one into the zone above or unlink the reference.</div>`;
+    } else if (doc) {
+      const api = game.itempiles?.API;
+      const name = doc.name ?? "Unknown container";
+      const img = doc.texture?.src ?? doc.img ?? "icons/svg/item-bag.svg";
+      let kind = "PILE";
+      try {
+        if (api?.isItemPileVault?.(doc)) kind = "VAULT";
+        else if (api?.isItemPileMerchant?.(doc)) kind = "MERCHANT";
+      } catch { /* keep PILE */ }
+      let itemCount = null;
+      try { itemCount = api?.getActorItems?.(doc, true)?.length ?? null; } catch { /* unknown */ }
+      const sceneName = doc.documentName === "Token" ? doc.parent?.name : null;
+      cardHtml = `
+        <div class="cgm-stash-card" data-open-stash title="Double-click to open the container">
+          <img class="cgm-stash-card-img" src="${foundry.utils.escapeHTML(img)}" alt="">
+          <div class="cgm-stash-card-info">
+            <div class="cgm-stash-card-name">${foundry.utils.escapeHTML(name)}</div>
+            <div class="cgm-stash-card-meta">
+              <span class="cgm-stash-badge">${kind}</span>
+              ${sceneName ? `<span class="cgm-stash-badge cgm-stash-badge-scene">${foundry.utils.escapeHTML(sceneName)}</span>` : ""}
+              ${itemCount !== null ? `<span class="cgm-stash-badge cgm-stash-badge-items">${itemCount} item${itemCount === 1 ? "" : "s"}</span>` : ""}
+            </div>
+          </div>
+          <div class="cgm-stash-card-actions">
+            <button type="button" class="cgm-stash-open" data-stash-open title="Open the container"><i class="fas fa-box-open"></i></button>
+            <button type="button" class="cgm-stash-unlink" data-stash-unlink title="Unlink stash"><i class="fas fa-unlink"></i></button>
+          </div>
+        </div>`;
+    }
+
+    return `
+      <div class="cgm-stash-head">The shared player stash is an <strong>Item Piles</strong> container. Drag a pile token from the canvas (or a pile actor from the sidebar) into the drop zone. Access rules (who may take what) are configured on the pile itself via Item Piles.</div>
+      ${dropzone}
+      ${cardHtml}
+    `;
+  }
+
+  /** Re-render the open Player Settings menu (after stash link/unlink) */
+  _refreshPlayerStashMenu() {
+    const menu = this._playerSettingsMenu;
+    if (menu?.rendered) menu.render({ force: true });
+  }
+
+  /** Bind PLAYER STASH submenu controls (drop zone, open, unlink) */
+  _bindPlayerStash(container) {
+    const dz = container.querySelector('[data-stash-dropzone]');
+    if (!dz) return;
+
+    // ── Drop zone: link an Item Piles container as the stash ──
+    dz.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dz.classList.add('cgm-stash-dropzone-over');
+    });
+    dz.addEventListener('dragleave', () => dz.classList.remove('cgm-stash-dropzone-over'));
+    dz.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dz.classList.remove('cgm-stash-dropzone-over');
+
+      if (!game.modules.get("item-piles")?.active) {
+        ui.notifications.warn("The Item Piles module is not active.");
+        return;
+      }
+
+      let data = null;
+      try { data = JSON.parse(e.dataTransfer.getData("text/plain")); } catch { /* ignore */ }
+      const uuid = data?.uuid;
+      if (!uuid || (data.type !== "Token" && data.type !== "Actor")) {
+        ui.notifications.info("Drop an Item Piles container token (from the canvas) or actor (from the sidebar) here.");
+        return;
+      }
+
+      let doc = null;
+      try { doc = await fromUuid(uuid); } catch { /* ignore */ }
+      if (!doc) {
+        ui.notifications.warn("Could not resolve the dropped document.");
+        return;
+      }
+
+      let valid = false;
+      try { valid = !!game.itempiles?.API?.isValidItemPile?.(doc); } catch { valid = false; }
+      if (!valid) valid = !!doc.getFlag?.("item-piles", "data");
+      if (!valid) {
+        ui.notifications.warn(`${doc.name ?? "That document"} is not an Item Piles container.`);
+        return;
+      }
+
+      await game.settings.set(MODULE_ID, "playerStash", { uuid });
+      ui.notifications.info(`${doc.name ?? "Container"} linked as the Player Stash.`);
+      this._refreshPlayerStashMenu();
+    });
+
+    // ── Open the stash container (button + double-click on the card) ──
+    const openStash = async () => {
+      const stash = this._getPlayerStash();
+      let doc = this._resolveStashDocSync(stash.uuid);
+      if (!doc && stash.uuid) {
+        try { doc = await fromUuid(stash.uuid); } catch { /* ignore */ }
+      }
+      if (!doc) {
+        ui.notifications.warn("The stash container no longer exists.");
+        return;
+      }
+      const api = game.itempiles?.API;
+      try {
+        if (api?.renderItemPileInterface) await api.renderItemPileInterface(doc);
+        else if (api?.openItemPileInventory) await api.openItemPileInventory(doc);
+        else if (doc.actor?.sheet) doc.actor.sheet.render(true);
+        else ui.notifications.warn("Item Piles API is not available.");
+      } catch (err) {
+        console.error("[CGM] Failed to open the player stash:", err);
+        ui.notifications.error("Failed to open the stash container.");
+      }
+    };
+    container.querySelector('[data-stash-open]')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openStash();
+    });
+    container.querySelector('[data-open-stash]')?.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openStash();
+    });
+
+    // ── Unlink the stash ──
+    container.querySelector('[data-stash-unlink]')?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      await game.settings.set(MODULE_ID, "playerStash", {});
+      ui.notifications.info("Player Stash unlinked.");
+      this._refreshPlayerStashMenu();
+    });
+  }
+
+  /* ── CYPHERS/ARTIFACTS: per-actor carry limit, synced to system.basic.cypherLimit ── */
+
+  /** Current cypher/artifact carry limit of an actor (0 = unlimited) */
+  _cypherLimitOf(actor) {
+    const v = Number(foundry.utils.getProperty(actor, "system.basic.cypherLimit") ?? 2);
+    return Number.isFinite(v) ? Math.max(0, Math.min(99, v)) : 2;
+  }
+
+  /** Carried cypher+artifact count of an actor */
+  _cypherCarriedOf(actor) {
+    return actor.items?.filter(i => i.type === "cypher" || i.type === "artifact").length ?? 0;
+  }
+
+  /** Build the CYPHERS/ARTIFACTS submenu: one row per player-owned PC */
+  _buildCypherLimitsHTML() {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner && a.testUserPermission(game.user, "OWNER"));
+    if (!actors.length) {
+      return `<div class="cgm-ps-empty"><i class="fas fa-user-slash"></i> No player-owned PCs found.</div>`;
+    }
+    actors.sort((a, b) => a.name.localeCompare(b.name));
+
+    const rows = actors.map(actor => {
+      const limit = this._cypherLimitOf(actor);
+      const carried = this._cypherCarriedOf(actor);
+      return `
+        <div class="cgm-cl-row" data-actor-id="${actor.id}">
+          <img class="cgm-cl-portrait" src="${actor.img || "icons/svg/mystery-man.svg"}" alt="${foundry.utils.escapeHTML(actor.name)}" draggable="false">
+          <span class="cgm-cl-name" title="${foundry.utils.escapeHTML(actor.name)}">${foundry.utils.escapeHTML(actor.name)}</span>
+          <span class="cgm-cl-count ${limit > 0 && carried > limit ? "cgm-cl-over" : ""}">${carried}/${limit || "∞"}</span>
+          <div class="cgm-cl-stepper">
+            <button type="button" class="cgm-cl-btn" data-cypher-minus="${actor.id}" title="Decrease limit"><i class="fas fa-minus"></i></button>
+            <span class="cgm-cl-value">${limit || "∞"}</span>
+            <button type="button" class="cgm-cl-btn" data-cypher-plus="${actor.id}" title="Increase limit"><i class="fas fa-plus"></i></button>
+          </div>
+        </div>`;
+    }).join("");
+
+    return `
+      <div class="cgm-cl-head">Maximum number of <strong>cyphers/artifacts</strong> each character can carry. Written to the actor's <strong>Cypher Limit</strong> sheet field, so the actor sheet and the cyphers radial menu stay in sync. <em>∞</em> = unlimited.</div>
+      ${rows}
+    `;
+  }
+
+  /** Bind CYPHERS/ARTIFACTS steppers (−/+ write system.basic.cypherLimit) */
+  _bindCypherLimits(container) {
+    container.addEventListener('click', async (e) => {
+      const minus = e.target.closest('[data-cypher-minus]');
+      const plus = e.target.closest('[data-cypher-plus]');
+      if (!minus && !plus) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const actorId = minus?.dataset.cypherMinus ?? plus?.dataset.cypherPlus;
+      const actor = game.actors.get(actorId);
+      if (!actor) return;
+
+      const current = this._cypherLimitOf(actor);
+      const next = Math.max(0, Math.min(99, current + (plus ? 1 : -1)));
+      if (next === current) return;
+
+      try {
+        await actor.update({ "system.basic.cypherLimit": next });
+      } catch (err) {
+        console.error("[CGM] Failed to update cypher limit:", err);
+        ui.notifications.error(`Failed to update ${actor.name}'s cypher limit.`);
+        return;
+      }
+
+      // Update the row in place (no full menu re-render)
+      const row = container.querySelector(`.cgm-cl-row[data-actor-id="${actorId}"]`);
+      if (row) {
+        const carried = this._cypherCarriedOf(actor);
+        const valueEl = row.querySelector('.cgm-cl-value');
+        if (valueEl) valueEl.textContent = String(next || "∞");
+        const countEl = row.querySelector('.cgm-cl-count');
+        if (countEl) {
+          countEl.textContent = `${carried}/${next || "∞"}`;
+          countEl.classList.toggle('cgm-cl-over', next > 0 && carried > next);
+        }
+      }
+      ui.notifications.info(`${actor.name}: cypher limit ${next || "∞ (unlimited)"}.`);
+    });
+  }
+
+  /* ── SPELLS PER DAY: per-actor ready limit, stored as an actor flag so the
+        Cypher Taskbar (player side) can read it live on the synced actor doc ── */
+
+  /** Read a cypher-taskbar JSON setting/pref at actor-pref → global-defaults → client priority
+      (mirrors the player taskbar's _gjson chain, using data visible to the GM client) */
+  _ctPrefOrSetting(actor, key, fallback = null) {
+    // 1. Actor-specific override (actor flag — synced to all clients)
+    try {
+      const prefs = actor.getFlag?.("cypher-taskbar", "taskbarPrefs") ?? {};
+      if (prefs[key] !== undefined) {
+        try { return typeof prefs[key] === "string" ? JSON.parse(prefs[key]) : prefs[key]; }
+        catch { return prefs[key]; }
+      }
+    } catch { /* ignore */ }
+    // 2. Global defaults (world setting, only when active)
+    try {
+      const active = game.settings.get("cypher-taskbar", "globalTaskbarDefaultsActive");
+      if (active) {
+        const raw = game.settings.get("cypher-taskbar", "globalTaskbarDefaultsData");
+        const gd = raw ? JSON.parse(raw) : {};
+        if (gd?.[key] !== undefined) return gd[key];
+      }
+    } catch { /* ignore */ }
+    // 3. GM's own client setting (same place the player's client keeps theirs)
+    try {
+      const raw = game.settings.get("cypher-taskbar", key);
+      if (raw !== undefined) return raw ? JSON.parse(raw) : fallback;
+    } catch { /* ignore */ }
+    return fallback;
+  }
+
+  /** Spell-named category check — same word list as the Cypher Taskbar */
+  _ctIsSpellName(name) {
+    const n = (name ?? "").trim().toLowerCase();
+    return ["spell", "spells", "magic"].includes(n);
+  }
+
+  /** Per-actor slice of a placement map (`{actorId: {itemId: {category, order}}}`),
+      mirroring the player taskbar's _getSkillPlacement/_getAbilityPlacement/_getSpellPlacement */
+  _ctPlacementFor(actor, key) {
+    const all = this._ctPrefOrSetting(actor, key, {}) ?? {};
+    return (all?.[actor.id] && typeof all[actor.id] === "object") ? all[actor.id] : {};
+  }
+
+  /** Does this actor use a Spells menu on the Cypher Taskbar?
+      Mirrors the player taskbar's _getSpellableItems detection from GM-visible data. */
+  _actorHasSpellsMenu(actor) {
+    if (!game.modules.get("cypher-taskbar")?.active) return true; // cannot check → don't hide anyone
+    try {
+      const skillCats = this._ctPrefOrSetting(actor, "skillsMenuCategories", []) ?? [];
+      const abCats    = this._ctPrefOrSetting(actor, "abilitiesMenuCategories", []) ?? [];
+      const spellCats = this._ctPrefOrSetting(actor, "spellsMenuCategories", []) ?? [];
+      const spellCatIds = new Set([
+        ...skillCats.filter(c => this._ctIsSpellName(c?.name)).map(c => c.id),
+        ...abCats.filter(c => this._ctIsSpellName(c?.name)).map(c => c.id)
+      ]);
+      const validSpellCats = new Set(["uncategorized", ...spellCats.filter(c => c?.id).map(c => c.id)]);
+      const skillPlacement = this._ctPlacementFor(actor, "skillsMenuPlacement");
+      const abPlacement    = this._ctPlacementFor(actor, "abilitiesMenuPlacement");
+      const spellPlacement = this._ctPlacementFor(actor, "spellsMenuPlacement");
+      const items = actor.items ?? [];
+      // skills/abilities placed in a spell-named category
+      for (const item of items) {
+        if (item.type === "skill") {
+          const p = skillPlacement?.[item.id];
+          if (p && spellCatIds.has(p.category)) return true;
+        } else if (["ability", "abilities"].includes(item.type)) {
+          const p = abPlacement?.[item.id];
+          if (p && spellCatIds.has(p.category)) return true;
+        }
+      }
+      // any skill/ability placed directly in the spells menu
+      for (const item of items) {
+        if (!["skill", "ability", "abilities"].includes(item.type)) continue;
+        const p = spellPlacement?.[item.id];
+        if (p && validSpellCats.has(p.category)) return true;
+      }
+      return false;
+    } catch (err) {
+      console.warn("[CGM] spells-menu detection failed for", actor?.name, err);
+      return true; // don't hide on error
+    }
+  }
+
+  /** Stored spells-per-day limit of an actor (0 = unlimited / unset) */
+  _spellsPerDayOf(actor) {
+    const raw = actor.getFlag?.("cypher-gm-taskbar", "spellsPerDayLimit");
+    if (raw === undefined || raw === null || raw === "") return 0;
+    const v = Number(raw);
+    return Number.isFinite(v) ? Math.max(0, Math.min(99, Math.round(v))) : 0;
+  }
+
+  /** Build the SPELLS PER DAY submenu: one row per player-owned PC that uses a Spells menu */
+  _buildSpellsPerDayHTML() {
+    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner && a.testUserPermission(game.user, "OWNER") && this._actorHasSpellsMenu(a));
+    if (!actors.length) {
+      return `<div class="cgm-ps-empty"><i class="fas fa-hat-wizard"></i> No player-owned PCs with a Spells menu found.</div>`;
+    }
+    actors.sort((a, b) => a.name.localeCompare(b.name));
+
+    const rows = actors.map(actor => {
+      const limit = this._spellsPerDayOf(actor);
+      return `
+        <div class="cgm-cl-row" data-actor-id="${actor.id}">
+          <img class="cgm-cl-portrait" src="${actor.img || "icons/svg/mystery-man.svg"}" alt="${foundry.utils.escapeHTML(actor.name)}" draggable="false">
+          <span class="cgm-cl-name" title="${foundry.utils.escapeHTML(actor.name)}">${foundry.utils.escapeHTML(actor.name)}</span>
+          <div class="cgm-cl-stepper">
+            <button type="button" class="cgm-cl-btn" data-spells-minus="${actor.id}" title="Decrease limit"><i class="fas fa-minus"></i></button>
+            <span class="cgm-cl-value">${limit || "∞"}</span>
+            <button type="button" class="cgm-cl-btn" data-spells-plus="${actor.id}" title="Increase limit"><i class="fas fa-plus"></i></button>
+          </div>
+        </div>`;
+    }).join("");
+
+    return `
+      <div class="cgm-cl-head">Maximum number of <strong>spells</strong> each character can ready per day in the Cypher Taskbar's Spells menu. <em>∞</em> = unlimited.</div>
+      ${rows}
+    `;
+  }
+
+  /** Bind SPELLS PER DAY steppers (−/+ write the cypher-gm-taskbar.spellsPerDayLimit actor flag) */
+  _bindSpellsPerDay(container) {
+    container.addEventListener('click', async (e) => {
+      const minus = e.target.closest('[data-spells-minus]');
+      const plus = e.target.closest('[data-spells-plus]');
+      if (!minus && !plus) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const actorId = minus?.dataset.spellsMinus ?? plus?.dataset.spellsPlus;
+      const actor = game.actors.get(actorId);
+      if (!actor) return;
+
+      const current = this._spellsPerDayOf(actor);
+      const next = Math.max(0, Math.min(99, current + (plus ? 1 : -1)));
+      if (next === current) return;
+
+      try {
+        await actor.setFlag("cypher-gm-taskbar", "spellsPerDayLimit", next);
+      } catch (err) {
+        console.error("[CGM] Failed to update spells-per-day limit:", err);
+        ui.notifications.error(`Failed to update ${actor.name}'s spells-per-day limit.`);
+        return;
+      }
+
+      const row = container.querySelector(`.cgm-cl-row[data-actor-id="${actorId}"]`);
+      if (row) {
+        const valueEl = row.querySelector('.cgm-cl-value');
+        if (valueEl) valueEl.textContent = String(next || "∞");
+      }
+      ui.notifications.info(`${actor.name}: spells per day ${next || "∞ (unlimited)"}.`);
+    });
   }
 
   /** Check if a portrait path is a video file (webm) */
@@ -1533,6 +2519,269 @@ class GMTaskbar {
     }
   }
 
+  /* Player's attack hit an NPC — review dialog routed here from cypher-taskbar
+     via the module.cypher-taskbar socket. GM sees the armor-reduced damage
+     (editable) and the attack item's Active Effects (checked by default);
+     CONFIRM applies with GM permissions and notifies the requesting player,
+     CANCEL drops everything and notifies too. */
+  async _openGMAttackOutcome({ userId, tokenUuid, itemUuid, totalDamage, armorReduction } = {}) {
+    if (!game.user?.isGM) return;
+    let tokenDoc = null;
+    try { tokenDoc = await fromUuid(tokenUuid); } catch { /* token gone */ }
+    const target = tokenDoc?.actor;
+    if (!target) {
+      ui.notifications?.warn?.("Attack outcome: target token no longer exists.");
+      return;
+    }
+    let item = null;
+    if (itemUuid) { try { item = await fromUuid(itemUuid); } catch { /* item gone */ } }
+    const attackerName = game.users?.get(userId)?.name ?? "Player";
+    // Armor reduction (CCI ARMOR REDUCTION on the attack item, 0-5): effective
+    // armor = max(0, targetArmor - reduction), never below 0.
+    const cciRed = Math.max(0, Math.min(5, Number(item?.getFlag?.("cypher-cool-items", "data")?.armorReduction) || 0));
+    const red = Number.isFinite(armorReduction) ? Math.max(0, Math.min(5, armorReduction)) : cciRed;
+    const rawArmor = this._npcArmorRating(target);
+    const armor = Math.max(0, rawArmor - red);
+    const rolled = Math.round(Number(totalDamage) || 0);
+    const applied = Math.max(0, rolled - armor);
+    const effects = (item?.effects?.contents ?? []).filter(e => e && !e.disabled);
+    const esc = s => foundry.utils.escapeHTML(String(s ?? ""));
+
+    const notifyRequester = approved => {
+      game.socket.emit("module.cypher-taskbar", {
+        type: "gmAttackOutcomeResolved",
+        userId,
+        approved,
+        targetName: target.name,
+        damage: applied
+      });
+    };
+
+    const result = await new Promise(resolve => {
+      new Dialog({
+        classes: ["cgm-dark-dialog", "cgm-attack-outcome-dialog"],
+        title: `Attack Hit — ${target.name}`,
+        content: `
+          <div class="cgm-attack-outcome-body">
+            <div class="cgm-attack-outcome-kicker">ATTACK OUTCOME — ${esc(attackerName).toUpperCase()} HIT</div>
+            <div class="cgm-attack-outcome-target">
+              ${item ? `<img src="${esc(item.img || 'icons/svg/combat.svg')}" alt="" draggable="false">` : ""}
+              <strong>${esc(target.name)}</strong>
+            </div>
+            <div class="cgm-attack-outcome-badges">
+              <span class="cgm-attack-outcome-badge">Rolled Damage: ${rolled}</span>
+              <span class="cgm-attack-outcome-badge">NPC Armor: ${armor}${red > 0 ? ` (−${red} reduction)` : ''}</span>
+              ${item ? `<span class="cgm-attack-outcome-badge">${esc(item.name)}</span>` : ""}
+            </div>
+            <label class="cgm-attack-outcome-dmg">
+              <span>Damage to ${esc(target.name)} (Health)</span>
+              <input type="number" name="damage" min="0" step="1" value="${applied}">
+            </label>
+            <div class="cgm-attack-outcome-fx-title">ACTIVE EFFECTS — APPLY TO ${esc(target.name).toUpperCase()}</div>
+            ${effects.length ? effects.map(e => `
+              <label class="cgm-attack-outcome-fx">
+                <input type="checkbox" name="cgmAtkFx" value="${e.id}" checked>
+                <img src="${esc(e.icon || item?.img || 'icons/svg/aura.svg')}" alt="" draggable="false">
+                <span>${esc(e.name)}</span>
+              </label>`).join("") : `<div class="cgm-attack-outcome-none">This attack has no active effects.</div>`}
+          </div>`,
+        buttons: {
+          confirm: {
+            icon: '<i class="fas fa-check"></i>',
+            label: "Confirm",
+            callback: html => {
+              const root = html?.[0] ?? html;
+              const dmg = Math.max(0, Math.round(Number(root?.querySelector('[name="damage"]')?.value ?? applied) || 0));
+              const fxIds = [...(root?.querySelectorAll('[name="cgmAtkFx"]:checked') ?? [])].map(cb => cb.value);
+              resolve({ dmg, fxIds });
+            }
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: "Cancel",
+            callback: () => resolve(null)
+          }
+        },
+        default: "confirm"
+      }).render(true);
+    });
+
+    if (!result) { notifyRequester(false); return; }
+    try {
+      await this._applyDamageAndEffects(target, result.dmg, item, result.fxIds);
+      ui.notifications?.info?.(`Applied ${result.dmg} damage to ${target.name}${result.fxIds.length ? ` + ${result.fxIds.length} effect(s)` : ""}.`);
+    } catch (err) {
+      console.error(`${MODULE_ID} | GM confirm apply failed`, err);
+      ui.notifications?.error?.("Failed to apply outcome — see console (F12).");
+    }
+    notifyRequester(true);
+  }
+
+  /* Player rolled a skill — GM decides whether the use costs a utility pip on
+     the player's combat bar. Routed here from cypher-taskbar via the
+     module.cypher-taskbar socket. SPEND expends 1 utility pip (applied on the
+     requesting player's client via gmSkillUtilityResolved); FREE rules the
+     use costs nothing. */
+  async _openGMSkillUtility({ userId, actorName, skillName, skillImg, rollTotal, achievedDifficulty, finalDifficulty } = {}) {
+    if (!game.user?.isGM) return;
+    const playerName = game.users?.get(userId)?.name ?? "Player";
+    const success = Number(achievedDifficulty) >= Number(finalDifficulty);
+    const esc = s => foundry.utils.escapeHTML(String(s ?? ""));
+    const notifyRequester = spend => {
+      game.socket.emit("module.cypher-taskbar", {
+        type: "gmSkillUtilityResolved",
+        userId,
+        spend,
+        skillName: skillName ?? "Skill"
+      });
+    };
+    new Dialog({
+      classes: ["cgm-dark-dialog", "cgm-attack-outcome-dialog"],
+      title: `Skill Roll — ${skillName}`,
+      content: `
+        <div class="cgm-attack-outcome-body">
+          <div class="cgm-attack-outcome-kicker">SKILL ROLL — ${esc(playerName).toUpperCase()}</div>
+          <div class="cgm-attack-outcome-target">
+            ${skillImg ? `<img src="${esc(skillImg)}" alt="" draggable="false">` : ""}
+            <strong>${esc(skillName)}</strong>
+          </div>
+          <div class="cgm-attack-outcome-badges">
+            <span class="cgm-attack-outcome-badge">Actor: ${esc(actorName)}</span>
+            <span class="cgm-attack-outcome-badge">Roll: ${esc(rollTotal)}</span>
+            <span class="cgm-attack-outcome-badge">Difficulty ${esc(finalDifficulty)} vs ${esc(achievedDifficulty)}</span>
+            <span class="cgm-attack-outcome-badge" style="${success ? 'background:rgba(124,252,160,0.12);border-color:rgba(124,252,160,0.35);color:#7cffa0;' : 'background:rgba(255,107,107,0.12);border-color:rgba(255,107,107,0.35);color:#ff6b6b;'}">${success ? 'SUCCESS' : 'FAILURE'}</span>
+          </div>
+          <div class="cgm-attack-outcome-fx-title">SPEND UTILITY?</div>
+          <div class="cgm-attack-outcome-none">SPEND — expend 1 utility pip on ${esc(playerName)}'s combat bar. FREE — this use costs nothing.</div>
+        </div>`,
+      buttons: {
+        spend: {
+          icon: '<i class="fas fa-screwdriver-wrench"></i>',
+          label: "Spend",
+          callback: () => notifyRequester(true)
+        },
+        free: {
+          icon: '<i class="fas fa-gift"></i>',
+          label: "Free",
+          callback: () => notifyRequester(false)
+        }
+      },
+      default: "free"
+    }).render(true);
+  }
+
+  /* Player declared an "other" action on the combat bar — the GM picks which
+     pips it costs. Multi-select chips MOVE/ACTION/UTILITY (NONE is exclusive
+     and clears the rest); CONFIRM at the bottom emits gmOtherPipsResolved and
+     the requesting player's client spends the pips. An empty selection (or
+     NONE) resolves as no cost. Routed via module.cypher-taskbar socket. */
+  async _openGMOtherPips({ userId, actorName, actorImg } = {}) {
+    if (!game.user?.isGM) return;
+    const playerName = game.users?.get(userId)?.name ?? "Player";
+    const esc = s => foundry.utils.escapeHTML(String(s ?? ""));
+    const notifyRequester = pips => {
+      game.socket.emit("module.cypher-taskbar", {
+        type: "gmOtherPipsResolved",
+        userId,
+        pips
+      });
+    };
+    new Dialog({
+      classes: ["cgm-dark-dialog", "cgm-attack-outcome-dialog"],
+      title: `Other Action — ${actorName}`,
+      content: `
+        <div class="cgm-attack-outcome-body">
+          <div class="cgm-attack-outcome-kicker">OTHER ACTION — ${esc(playerName).toUpperCase()}</div>
+          <div class="cgm-attack-outcome-target">
+            ${actorImg ? `<img src="${esc(actorImg)}" alt="" draggable="false">` : ""}
+            <strong>${esc(actorName)}</strong>
+          </div>
+          <div class="cgm-attack-outcome-badges">
+            <span class="cgm-attack-outcome-badge">Player: ${esc(playerName)}</span>
+            <span class="cgm-attack-outcome-badge">Declared a miscellaneous action</span>
+          </div>
+          <div class="cgm-attack-outcome-fx-title">WHICH PIPS DOES THIS COST?</div>
+          <div class="cgm-other-chips">
+            <button type="button" class="cgm-other-chip" data-other-pip="move"><i class="fas fa-person-running"></i> MOVE</button>
+            <button type="button" class="cgm-other-chip" data-other-pip="action"><i class="fas fa-bolt"></i> ACTION</button>
+            <button type="button" class="cgm-other-chip" data-other-pip="utility"><i class="fas fa-screwdriver-wrench"></i> UTILITY</button>
+            <button type="button" class="cgm-other-chip cgm-other-chip-none" data-other-pip="none"><i class="fas fa-gift"></i> NONE</button>
+          </div>
+          <div class="cgm-attack-outcome-none">Select one or more pips — or NONE — then CONFIRM. The spent pips are removed from ${esc(playerName)}'s combat bar.</div>
+        </div>`,
+      buttons: {
+        confirm: {
+          icon: '<i class="fas fa-check"></i>',
+          label: "Confirm",
+          callback: (html) => {
+            const root = html?.[0] ?? html?.element?.[0] ?? html;
+            const pips = [...(root?.querySelectorAll?.(".cgm-other-chip-on[data-other-pip]:not([data-other-pip='none'])") ?? [])]
+              .map(b => b.dataset.otherPip);
+            notifyRequester(pips);
+          }
+        }
+      },
+      default: "confirm",
+      render: (html) => {
+        const root = html?.[0] ?? html?.element?.[0] ?? html;
+        root?.querySelectorAll?.(".cgm-other-chip")?.forEach(chip => {
+          chip.onclick = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const isNone = chip.dataset.otherPip === "none";
+            if (isNone) {
+              const on = chip.classList.contains("cgm-other-chip-on");
+              root.querySelectorAll(".cgm-other-chip").forEach(c => c.classList.remove("cgm-other-chip-on"));
+              if (!on) chip.classList.add("cgm-other-chip-on");
+            } else {
+              chip.classList.toggle("cgm-other-chip-on");
+              if (chip.classList.contains("cgm-other-chip-on")) {
+                root.querySelector(".cgm-other-chip[data-other-pip='none']")?.classList.remove("cgm-other-chip-on");
+              }
+            }
+          };
+        });
+      }
+    }).render(true);
+  }
+
+  /* Armor rating of a cypher-npc NPC, from its active defense — same math the
+     cypher-npc token HUD uses. Default defense → system.combat.armor; armor item
+     → its rating; ability/attack defense item → defenseArmor (cool-items data). */
+  _npcArmorRating(actor) {
+    if (!actor) return 0;
+    const fallback = Number(actor.system?.combat?.armor ?? 0) || 0;
+    const activeDefId = actor.getFlag?.("cypher-npc-elegance", "activeDefense") || "default";
+    if (activeDefId === "default") return fallback;
+    const defItem = actor.items?.get?.(activeDefId);
+    if (!defItem) return fallback;
+    if (defItem.type === "armor") {
+      return Number(defItem.system?.basic?.rating ?? defItem.system?.rating ?? 0) || 0;
+    }
+    const cci = defItem.getFlag?.("cypher-cool-items", "data") || {};
+    return Number(cci.defenseArmor ?? 0) || 0;
+  }
+
+  /* Apply `applied` damage to the target's health pool and transfer the attack
+     item's Active Effects. effectIds = null applies all; an array (even empty)
+     applies only the listed effect ids. Runs with GM permissions (GM-only module). */
+  async _applyDamageAndEffects(target, applied, item, effectIds = null) {
+    if (applied > 0) {
+      const health = foundry.utils.getProperty(target, "system.pools.health") ?? {};
+      const cur = Number(health.value ?? 0);
+      await target.update({ "system.pools.health.value": Math.max(0, cur - applied) });
+    }
+    const effects = (item?.effects?.contents ?? [])
+      .filter(e => e && !e.disabled && (effectIds == null || effectIds.includes(e.id)));
+    if (effects.length) {
+      const existing = new Set((target.effects?.contents ?? []).map(e => `${e.name}|${e.origin ?? ""}`));
+      const toCreate = effects
+        .filter(e => !existing.has(`${e.name}|${item.uuid}`))
+        .map(e => { const d = e.toObject(); delete d._id; d.origin = item.uuid; return d; });
+      if (toCreate.length) await target.createEmbeddedDocuments("ActiveEffect", toCreate);
+    }
+  }
+
   /* Load saved panel positions from synced settings (with localStorage fallback for migration) */
   _loadPanelPositions() {
     try {
@@ -1742,6 +2991,7 @@ class GMTaskbar {
     if (this._buttonObserver) { this._buttonObserver.disconnect(); this._buttonObserver = null; }
     document.querySelector(`#${MODULE_ID}-bar`)?.remove();
     document.querySelector(`.cgm-panel`)?.remove();
+    document.querySelector(`.cgm-dice-tray`)?.remove();
     document.querySelector(`.cgm-portraits-bg-wrap`)?.remove();
     if (this._connInterval) clearInterval(this._connInterval);
     if (this._playerMonitorInterval) clearInterval(this._playerMonitorInterval);
@@ -1750,6 +3000,8 @@ class GMTaskbar {
     if (this._xpCountInterval) clearInterval(this._xpCountInterval);
     if (this._xpButtonStatusInterval) clearInterval(this._xpButtonStatusInterval);
     if (this._tooltipTimer) clearTimeout(this._tooltipTimer);
+    if (this._tooltipShowTimer) clearTimeout(this._tooltipShowTimer);
+    if (this._tooltipHideTimer) clearTimeout(this._tooltipHideTimer);
     if (this._effectTooltipTimer) clearTimeout(this._effectTooltipTimer);
     // Clear party data cache on full re-render
     this._partyDataCache = null;
@@ -1769,6 +3021,9 @@ class GMTaskbar {
 
     // Create portrait background panel as separate element (behind bar)
     this._createPortraitBg();
+
+    // Create floating dice tray above bar (left corner)
+    this._createDiceTray();
 
     this._applySettings();
     this._bindEvents();
@@ -1830,9 +3085,13 @@ class GMTaskbar {
       { id: "npc", action: "openNPCCanvas", icon: "fa-users", color: "", title: "NPC Canvas", defaultSection: 1 },
       { id: "enemy", action: "openEnemyCanvas", icon: "fa-tooth", color: "#cc3333", title: "Enemy Canvas", defaultSection: 1 },
       { id: "items", action: "openItemsCanvas", icon: "fa-hammer", color: "", title: "Items", defaultSection: 1 },
+      { id: "gallery", action: "openGalleryCanvas", icon: "fa-photo-film", color: "", title: "Gallery", defaultSection: 1 },
       { id: "reputation", action: "openReputation", icon: "fa-handshake", color: "#e8a87c", title: "Reputation and gossips", defaultSection: 1 },
       { id: "random", action: "openRandomPanel", icon: "fa-globe", color: "#8a6de9", title: "Random", defaultSection: 1 },
       { id: "connections", action: "openConnections", icon: "fa-project-diagram", color: "#c9a227", title: "Connections", defaultSection: 1, requiresModule: "cypher-connections" },
+      // NOTE: no `social` def here on purpose — the GM Taskbar already has
+      // its own dedicated Social button (cgm-social-btn) rendered left of
+      // the sections. A section def would duplicate it.
       { id: "recovery", action: "openRecoveryMenu", icon: "fa-droplet", color: "#3b82f6", title: "Recovery", defaultSection: 0 },
     ];
     // Merge with dynamically discovered buttons (injected by other modules)
@@ -1868,7 +3127,7 @@ class GMTaskbar {
 
     // Only skip our built-in static buttons — injected buttons must be re-discovered
     // after every render since their DOM elements (and event listeners) are destroyed
-    const staticIds = new Set(["gmroll", "groupstatus", "quickscene", "cypherlog", "scene", "npc", "items", "enemy", "reputation", "random", "connections", "recovery"]);
+    const staticIds = new Set(["gmroll", "groupstatus", "quickscene", "cypherlog", "scene", "npc", "items", "enemy", "reputation", "random", "connections", "social", "recovery"]);
     const dynamic = [];
     const sections = bar.querySelectorAll('.cgm-custom-section');
 
@@ -2044,7 +3303,7 @@ class GMTaskbar {
         </button>
 
         <!-- Portraits button -->
-        <button class="cgm-icon-btn cgm-portraits-btn" id="cgm-btn-portraits" title="Manage Actor Portraits">
+        <button class="cgm-icon-btn cgm-portraits-btn" id="cgm-btn-portraits" title="Player Settings">
           <i class="fas fa-portrait" style="color:#c8a96e;"></i>
         </button>
 
@@ -2091,6 +3350,15 @@ class GMTaskbar {
         <div class="cgm-connections-wrap">
           <button class="cgm-icon-btn cgm-connections-btn" data-action="openConnections" title="Connections">
             <i class="fas fa-project-diagram" style="color:#c9a227;"></i>
+          </button>
+        </div>
+        ` : ""}
+
+        <!-- Cypher Social button (shown only when module is active) -->
+        ${game.modules?.get("cypher-social")?.active ? `
+        <div class="cgm-social-wrap">
+          <button class="cgm-icon-btn cgm-social-btn" data-action="openSocial" title="Social">
+            <i class="fas fa-share-nodes" style="color:#4ecdc4;"></i>
           </button>
         </div>
         ` : ""}
@@ -2197,13 +3465,28 @@ class GMTaskbar {
     `;
   }
 
-  /* Sync portrait background width to match float content */
+  /* Sync portrait background geometry to match float content:
+     width always; height on the portrait side follows the actual
+     portrait row (portrait size, name-above, effect icons), while the
+     opposite side keeps the CSS extension behind the bar. */
   _syncPortraitBgWidth() {
     if (!this.element) return;
     const float = this.element.querySelector('.cgm-portraits-float');
     const bgWrap = document.querySelector('.cgm-portraits-bg-wrap');
-    if (float && bgWrap) {
-      bgWrap.style.width = float.offsetWidth + 'px';
+    const bg = bgWrap?.querySelector('.cgm-portraits-bg');
+    if (!float || !bgWrap || !bg) return;
+    bgWrap.style.width = float.offsetWidth + 'px';
+    const fr = float.getBoundingClientRect();
+    const wr = bgWrap.getBoundingClientRect();
+    const margin = 8;
+    if (this._dock === 'top') {
+      // Top dock: bg bottom follows portraits; top stays CSS (behind bar)
+      bg.style.bottom = (wr.bottom - fr.bottom - margin) + 'px';
+      bg.style.top = '';
+    } else {
+      // Bottom dock: bg top follows portraits; bottom stays CSS (behind bar)
+      bg.style.top = (fr.top - wr.top - margin) + 'px';
+      bg.style.bottom = '';
     }
   }
 
@@ -2229,6 +3512,144 @@ class GMTaskbar {
 
     // Sync width after portraits render
     this._syncPortraitBgWidth();
+  }
+
+  /* ═══════════════════════════════════════════
+     DICE TRAY — floating quick-dice + roll history
+     (mirrors Cypher Taskbar dice bar, GM-side)
+     ═══════════════════════════════════════════ */
+
+  _createDiceTray() {
+    const tray = document.createElement('div');
+    tray.id = 'cgm-dice-tray';
+    tray.className = `cgm-dice-tray cgm-dice-tray-${this._dock}`;
+    tray.innerHTML = this._buildDiceTrayHTML();
+    document.body.appendChild(tray);
+    this._diceTrayEl = tray;
+    this._bindDiceTrayEvents();
+    this._renderDiceHistory();
+  }
+
+  _buildDiceTrayHTML() {
+    const visIcon = this._diceResultsVisible ? 'fa-eye' : 'fa-eye-slash';
+    const visCls = this._diceResultsVisible ? '' : ' cgm-dice-history-hidden';
+    return `
+      <div class="cgm-dice-tray-inner">
+        <div class="cgm-dice-tray-buttons">
+          <button class="cgm-dice-btn" data-die="d100" title="Roll d100">
+            <i class="fa-solid fa-percent"></i>
+          </button>
+          <button class="cgm-dice-btn" data-die="d6" title="Roll d6">
+            <i class="fa-solid fa-dice-six"></i>
+          </button>
+          <button class="cgm-dice-btn" data-die="d10" title="Roll d10">
+            <i class="fa-solid fa-dice-d10"></i>
+          </button>
+          <button class="cgm-dice-btn" data-die="d20" title="Roll d20">
+            <i class="fa-solid fa-dice-d20"></i>
+          </button>
+        </div>
+        <button class="cgm-dice-toggle" title="${this._diceResultsVisible ? 'Hide' : 'Show'} roll results">
+          <i class="fas ${visIcon}"></i>
+        </button>
+      </div>
+      <div class="cgm-dice-history${visCls}"></div>
+    `;
+  }
+
+  _bindDiceTrayEvents() {
+    if (!this._diceTrayEl) return;
+
+    // Dice buttons
+    this._diceTrayEl.querySelectorAll('.cgm-dice-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await this._rollTrayDie(btn.dataset.die);
+      });
+    });
+
+    // Toggle results visibility
+    this._diceTrayEl.querySelector('.cgm-dice-toggle')?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._diceResultsVisible = !this._diceResultsVisible;
+      await this._ss('diceResultsVisible', this._diceResultsVisible);
+      this._updateDiceTrayToggle();
+    });
+  }
+
+  _updateDiceTrayToggle() {
+    if (!this._diceTrayEl) return;
+    const toggle = this._diceTrayEl.querySelector('.cgm-dice-toggle');
+    if (toggle) {
+      toggle.title = `${this._diceResultsVisible ? 'Hide' : 'Show'} roll results`;
+      const icon = toggle.querySelector('i');
+      if (icon) icon.className = `fas ${this._diceResultsVisible ? 'fa-eye' : 'fa-eye-slash'}`;
+    }
+    const hist = this._diceTrayEl.querySelector('.cgm-dice-history');
+    if (hist) hist.classList.toggle('cgm-dice-history-hidden', !this._diceResultsVisible);
+  }
+
+  async _rollTrayDie(die) {
+    if (!die) return;
+    try {
+      const roll = new Roll(`1${die}`);
+      await roll.evaluate();
+      await roll.toMessage({ speaker: ChatMessage.getSpeaker() });
+      this._recordTrayRoll({
+        type: 'dice',
+        label: die,
+        total: Number(roll.total ?? 0),
+        detail: '',
+        tooltip: `${die} — Rolled ${roll.total}`,
+        flavor: `<p><strong>${die}</strong> — Rolled ${roll.total}</p>`,
+        success: null
+      });
+    } catch (err) {
+      console.error(`${MODULE_ID} | Dice roll failed:`, err);
+      ui.notifications.error('Dice roll failed.');
+    }
+  }
+
+  _recordTrayRoll(entry) {
+    this._diceHistory.unshift({ ...entry, ts: Date.now() });
+    if (this._diceHistory.length > 8) this._diceHistory.length = 8;
+    this._renderDiceHistory();
+  }
+
+  _renderDiceHistory() {
+    if (!this._diceTrayEl) return;
+    const hist = this._diceTrayEl.querySelector('.cgm-dice-history');
+    if (!hist) return;
+    hist.innerHTML = this._diceHistory.map((r, i) => this._buildDiceChip(r, i)).join('');
+    // Bind chip clicks to re-announce
+    hist.querySelectorAll('.cgm-dice-chip').forEach(chip => {
+      chip.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const idx = parseInt(chip.dataset.chipIndex);
+        await this._announceTrayRoll(this._diceHistory[idx]);
+      });
+    });
+  }
+
+  _buildDiceChip(entry, idx) {
+    const cls = entry.success === true ? ' cgm-chip-hit' : entry.success === false ? ' cgm-chip-miss' : '';
+    const icon = entry.type === 'attack' ? 'fa-sword' : entry.type === 'skill' ? 'fa-graduation-cap' : entry.type === 'attribute' ? 'fa-person-running' : 'fa-dice-d20';
+    return `<button class="cgm-dice-chip${cls}" data-chip-index="${idx}" title="${foundry.utils.escapeHTML(entry.tooltip)}">
+      <i class="fas ${icon}"></i>
+      <span class="cgm-chip-total">${entry.total}</span>
+      ${entry.detail ? `<span class="cgm-chip-detail">${foundry.utils.escapeHTML(entry.detail)}</span>` : ''}
+    </button>`;
+  }
+
+  async _announceTrayRoll(entry) {
+    if (!entry) return;
+    await ChatMessage.create({
+      speaker: ChatMessage.getSpeaker(),
+      content: `<div class="cgm-reroll-flavor"><em style="opacity:0.7;font-size:0.85em;"><i class="fas fa-rotate-left"></i> Re-announced roll:</em></div>${entry.flavor}`
+    });
   }
 
   /* ─── Floating Portraits (above bar, left side) ─── */
@@ -2298,9 +3719,11 @@ class GMTaskbar {
           const actor = game.actors.get(pc.id);
           const individualDiff = actor?.getFlag("cypher-gm-taskbar", "targetDifficulty") ?? 0;
           const isDisconnected = this._disconnectedActors?.has(pc.id);
+          const awayMs = this._disconnectionTimes?.get(pc.id);
+          const isAway = isDisconnected && awayMs && (Date.now() - awayMs) >= 120000;
           const isActive = this._isActorOwnerActive(pc.id);
           return `
-          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isDisconnected ? 'cgm-portrait-disconnected' : ''} ${isActive ? 'cgm-portrait-active' : ''}" data-actor-id="${pc.id}">
+          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isAway ? 'cgm-portrait-away' : isDisconnected ? 'cgm-portrait-disconnected' : ''} ${isActive ? 'cgm-portrait-active' : ''}" data-actor-id="${pc.id}">
             <div class="cgm-portrait-difficulty ${individualDiff > 0 ? 'cgm-difficulty-active' : ''}">${individualDiff > 0 ? individualDiff : ''}</div>
             ${isDisconnected ? '<div class="cgm-offline-badge"><i class="fas fa-wifi-slash"></i></div>' : ''}
             <div class="cgm-portrait-visual">
@@ -2402,6 +3825,18 @@ class GMTaskbar {
       note.archived = true;
       await actor.setFlag("cypher-gm-taskbar", "actorNotes", notes);
       console.log(`${MODULE_ID} | Note archived for ${actor.name}:`, noteId);
+    }
+  }
+
+  async _unarchiveActorNote(actorId, noteId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const notes = this._getActorNotes(actor, true);
+    const note = notes.find(n => n.id === noteId);
+    if (note) {
+      note.archived = false;
+      await actor.setFlag("cypher-gm-taskbar", "actorNotes", notes);
+      console.log(`${MODULE_ID} | Note unarchived for ${actor.name}:`, noteId);
     }
   }
 
@@ -2640,7 +4075,7 @@ ${paths}  </svg>
     requestAnimationFrame(() => menu.classList.add("cgm-radial-visible"));
 
     // Click handlers
-    const onSegClick = (e) => {
+    const onSegClick = async (e) => {
       e.stopPropagation();
       const action = e.currentTarget.dataset.action;
       const id = e.currentTarget.dataset.actorId;
@@ -2671,12 +4106,19 @@ ${paths}  </svg>
               ui.notifications.warn(`${a.name} has no player owner online.`);
               return;
             }
+            const description = await Dialog.prompt({
+              title: `GM Intrusion — ${a.name}`,
+              content: `<p>Describe the intrusion (optional):</p><textarea style="width:100%;height:64px;resize:vertical;"></textarea>`,
+              callback: (html) => html.find("textarea").val()
+            });
+            if (description == null) return; // cancelled
             for (const user of owners) {
               game.socket.emit("module.cypher-gm-taskbar", {
                 action: "requestIntrusion",
                 userId: user.id,
                 actorId: a.id,
-                actorUuid: a.uuid
+                actorUuid: a.uuid,
+                description
               });
             }
             ui.notifications.info(`Intrusion request sent to ${a.name}'s player.`);
@@ -2718,6 +4160,9 @@ ${paths}  </svg>
   }
 
   _hideRadialMenu() {
+    // Hard guarantee: closing the radial system erases every tether line,
+    // even if a menu element was already torn down by another path.
+    this._removeAllGMGroupRollLines();
     if (this._radialMenuEl) {
       this._radialMenuEl.remove();
       this._radialMenuEl = null;
@@ -2859,6 +4304,7 @@ ${paths}  </svg>
 
     // Vertical action buttons — lock icon reflects CURRENT state
     const vButtons = [
+      { action: "playerTasks", icon: "fa-clipboard-list", title: "Player Tasks", color: "#c8a96e" },
       { action: "toggleLockSheets", icon: lockSheets ? "fa-lock" : "fa-unlock", title: lockSheets ? "Unlock actor sheets for players" : "Lock actor sheets for players", color: "#e74c3c" },
       { action: "awardXp", icon: "fa-star", title: "Award XP", color: "#ffd700" },
       { action: "toggleCombat", icon: "fa-swords", title: "Toggle combat", color: "#3498db" },
@@ -2933,6 +4379,7 @@ ${paths}  </svg>
         e.stopPropagation();
         const action = btn.dataset.action;
         if (action === "toggleLockSheets") await this._toggleLockActorSheets();
+        else if (action === "playerTasks") this._openPlayerTasksPanel();
         else if (action === "awardXp") await this._awardXpFlow();
         else if (action === "toggleCombat") await this._toggleCombat();
         else if (action === "togglePause") game.togglePause();
@@ -3011,10 +4458,12 @@ ${paths}  </svg>
 
   _hideGMMenu() {
     if (this._gmMenuEl) {
+      const el = this._gmMenuEl;
+      this._gmMenuEl = null;
       this._cleanupGMMenuDrag?.();
       this._cleanupGMMenuDrag = null;
-      this._gmMenuEl.classList.remove("cgm-gm-winmenu-visible");
-      setTimeout(() => { this._gmMenuEl?.remove(); this._gmMenuEl = null; }, 200);
+      el.classList.remove("cgm-gm-winmenu-visible");
+      setTimeout(() => el.remove(), 200);
     }
   }
 
@@ -3216,12 +4665,19 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollMenu() {
-    if (this._gmGroupRollMenuEl) {
+    // Line removal is unconditional: a close path that runs after the
+    // element was already torn down (double-hide, fade-timeout race) must
+    // still erase the tether, or it strands on screen until reload.
+    this._removeAllGMGroupRollLines();
+    const el = this._gmGroupRollMenuEl;
+    if (el) {
       this._cleanupGMGroupRollDrag?.();
       this._cleanupGMGroupRollDrag = null;
-      this._removeAllGMGroupRollLines();
-      this._gmGroupRollMenuEl.classList.remove("cgm-radial-visible");
-      setTimeout(() => { this._gmGroupRollMenuEl?.remove(); this._gmGroupRollMenuEl = null; }, 200);
+      el.classList.remove("cgm-radial-visible");
+      setTimeout(() => {
+        el.remove();
+        if (this._gmGroupRollMenuEl === el) this._gmGroupRollMenuEl = null;
+      }, 200);
     }
   }
 
@@ -4625,12 +6081,16 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollAttributes() {
-    if (this._gmGroupRollAttributesEl) {
+    this._removeGMGroupRollLine("cgm-gmroll-line-attributes");
+    const el = this._gmGroupRollAttributesEl;
+    if (el) {
       this._cleanupGMGroupRollAttributesDrag?.();
       this._cleanupGMGroupRollAttributesDrag = null;
-      this._removeGMGroupRollLine("cgm-gmroll-line-attributes");
-      this._gmGroupRollAttributesEl.classList.remove("cgm-radial-visible");
-      setTimeout(() => { this._gmGroupRollAttributesEl?.remove(); this._gmGroupRollAttributesEl = null; }, 200);
+      el.classList.remove("cgm-radial-visible");
+      setTimeout(() => {
+        el.remove();
+        if (this._gmGroupRollAttributesEl === el) this._gmGroupRollAttributesEl = null;
+      }, 200);
     }
   }
 
@@ -4649,12 +6109,16 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollSkills() {
-    if (this._gmGroupRollSkillsEl) {
+    this._removeGMGroupRollLine("cgm-gmroll-line-skills");
+    const el = this._gmGroupRollSkillsEl;
+    if (el) {
       this._cleanupGMGroupRollSkillsDrag?.();
       this._cleanupGMGroupRollSkillsDrag = null;
-      this._removeGMGroupRollLine("cgm-gmroll-line-skills");
-      this._gmGroupRollSkillsEl.classList.remove("cgm-radial-visible");
-      setTimeout(() => { this._gmGroupRollSkillsEl?.remove(); this._gmGroupRollSkillsEl = null; }, 200);
+      el.classList.remove("cgm-radial-visible");
+      setTimeout(() => {
+        el.remove();
+        if (this._gmGroupRollSkillsEl === el) this._gmGroupRollSkillsEl = null;
+      }, 200);
     }
   }
 
@@ -4671,12 +6135,16 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollFree() {
-    if (this._gmGroupRollFreeEl) {
+    this._removeGMGroupRollLine("cgm-gmroll-line-free");
+    const el = this._gmGroupRollFreeEl;
+    if (el) {
       this._cleanupGMGroupRollFreeDrag?.();
       this._cleanupGMGroupRollFreeDrag = null;
-      this._removeGMGroupRollLine("cgm-gmroll-line-free");
-      this._gmGroupRollFreeEl.classList.remove("cgm-radial-visible");
-      setTimeout(() => { this._gmGroupRollFreeEl?.remove(); this._gmGroupRollFreeEl = null; }, 200);
+      el.classList.remove("cgm-radial-visible");
+      setTimeout(() => {
+        el.remove();
+        if (this._gmGroupRollFreeEl === el) this._gmGroupRollFreeEl = null;
+      }, 200);
     }
   }
 
@@ -4693,12 +6161,16 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollDefense() {
-    if (this._gmGroupRollDefenseEl) {
+    this._removeGMGroupRollLine("cgm-gmroll-line-defense");
+    const el = this._gmGroupRollDefenseEl;
+    if (el) {
       this._cleanupGMGroupRollDefenseDrag?.();
       this._cleanupGMGroupRollDefenseDrag = null;
-      this._removeGMGroupRollLine("cgm-gmroll-line-defense");
-      this._gmGroupRollDefenseEl.classList.remove("cgm-radial-visible");
-      setTimeout(() => { this._gmGroupRollDefenseEl?.remove(); this._gmGroupRollDefenseEl = null; }, 200);
+      el.classList.remove("cgm-radial-visible");
+      setTimeout(() => {
+        el.remove();
+        if (this._gmGroupRollDefenseEl === el) this._gmGroupRollDefenseEl = null;
+      }, 200);
     }
   }
 
@@ -6967,17 +8439,35 @@ ${paths}  </svg>
     });
 
     // ── Build notes content ──
-    const notesList = notes.length
-      ? notes.map((n) => `
-        <div class="cgm-note-item ${n.archived ? 'cgm-note-archived' : ''}">
+    const activeNotes = notes.filter(n => !n.archived);
+    const archivedNotes = notes.filter(n => n.archived);
+
+    const activeList = activeNotes.length
+      ? activeNotes.map((n) => `
+        <div class="cgm-note-item" data-note-id="${n.id}">
           <div class="cgm-note-meta">
-            <span>${n.date} ${n.time} ${n.archived ? '<span class="cgm-note-archive-badge">Archived</span>' : ''}</span>
+            <span>${n.date} ${n.time}</span>
             <button class="cgm-note-delete" data-note-id="${n.id}" title="Delete"><i class="fas fa-times"></i></button>
           </div>
           <div class="cgm-note-text">${this._escapeHTML(n.text)}</div>
         </div>
       `).join("")
       : `<div class="cgm-note-empty">No notes yet. Add one below!</div>`;
+
+    const archiveList = archivedNotes.length
+      ? archivedNotes.map((n) => `
+        <div class="cgm-note-item cgm-note-archived" data-note-id="${n.id}">
+          <div class="cgm-note-meta">
+            <span>${n.date} ${n.time} <span class="cgm-note-archive-badge">Archived</span></span>
+            <div class="cgm-note-archive-actions">
+              <button class="cgm-note-unarchive" data-note-id="${n.id}" title="Restore to Notes"><i class="fas fa-rotate-left"></i></button>
+              <button class="cgm-note-delete" data-note-id="${n.id}" title="Delete permanently"><i class="fas fa-times"></i></button>
+            </div>
+          </div>
+          <div class="cgm-note-text">${this._escapeHTML(n.text)}</div>
+        </div>
+      `).join("")
+      : `<div class="cgm-note-empty">No archived notes.</div>`;
 
     // ── Create panel ──
     const panel = document.createElement("div");
@@ -6990,7 +8480,16 @@ ${paths}  </svg>
         <span>${name}</span>
         <button class="cgm-notes-panel-close"><i class="fas fa-xmark"></i></button>
       </div>
-      <div class="cgm-notes-panel-list">${notesList}</div>
+      <div class="cgm-notes-tabs">
+        <button class="cgm-notes-tab cgm-notes-tab-active" data-tab="active">
+          <i class="fas fa-note-sticky"></i> Notes <span class="cgm-notes-tab-count">${activeNotes.length}</span>
+        </button>
+        <button class="cgm-notes-tab" data-tab="archive">
+          <i class="fas fa-box-archive"></i> Archive <span class="cgm-notes-tab-count">${archivedNotes.length}</span>
+        </button>
+      </div>
+      <div class="cgm-notes-panel-list cgm-notes-list-active">${activeList}</div>
+      <div class="cgm-notes-panel-list cgm-notes-list-archive" style="display:none;">${archiveList}</div>
       <div class="cgm-notes-panel-add">
         <textarea class="cgm-notes-input" placeholder="Write a note..."></textarea>
         <button class="cgm-notes-panel-add-btn">
@@ -7056,10 +8555,37 @@ ${paths}  </svg>
     });
 
     // ── Handlers ──
+    let currentTab = "active";
     const refreshPanel = async () => {
       this._hideNotesPanel();
       await this._showNotesDialog(actorId, wrapEl);
+      // Restore the tab the user was on
+      if (currentTab === "archive") {
+        const newPanel = this._notesPanelEl;
+        if (newPanel) {
+          newPanel.querySelector('.cgm-notes-tab[data-tab="active"]')?.classList.remove("cgm-notes-tab-active");
+          newPanel.querySelector('.cgm-notes-tab[data-tab="archive"]')?.classList.add("cgm-notes-tab-active");
+          newPanel.querySelector(".cgm-notes-list-active")?.setAttribute("style", "display:none;");
+          newPanel.querySelector(".cgm-notes-list-archive")?.setAttribute("style", "");
+          newPanel.querySelector(".cgm-notes-panel-add")?.setAttribute("style", "display:none;");
+        }
+      }
     };
+
+    // Tab switching
+    panel.querySelectorAll(".cgm-notes-tab").forEach(tabBtn => {
+      tabBtn.addEventListener("click", () => {
+        const tab = tabBtn.dataset.tab;
+        if (tab === currentTab) return;
+        currentTab = tab;
+        panel.querySelectorAll(".cgm-notes-tab").forEach(t => t.classList.remove("cgm-notes-tab-active"));
+        tabBtn.classList.add("cgm-notes-tab-active");
+        const isActive = tab === "active";
+        panel.querySelector(".cgm-notes-list-active")?.setAttribute("style", isActive ? "" : "display:none;");
+        panel.querySelector(".cgm-notes-list-archive")?.setAttribute("style", isActive ? "display:none;" : "");
+        panel.querySelector(".cgm-notes-panel-add")?.setAttribute("style", isActive ? "" : "display:none;");
+      });
+    });
 
     panel.querySelector(".cgm-notes-panel-close")?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -7078,6 +8604,14 @@ ${paths}  </svg>
       btn.addEventListener("click", async () => {
         const noteId = btn.dataset.noteId;
         await this._deleteActorNote(actorId, noteId);
+        await refreshPanel();
+      });
+    });
+
+    panel.querySelectorAll(".cgm-note-unarchive").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const noteId = btn.dataset.noteId;
+        await this._unarchiveActorNote(actorId, noteId);
         await refreshPanel();
       });
     });
@@ -8493,7 +10027,7 @@ ${paths}  </svg>
         ${notes.map((n, i) => `
           <div class="cgm-tooltip-note" data-index="${i}">
             <label class="cgm-tooltip-check">
-              <input type="checkbox" data-index="${i}" data-actor-id="${actorId}">
+              <input type="checkbox" data-note-id="${n.id}" data-actor-id="${actorId}">
               <span class="cgm-check-mark"></span>
             </label>
             <div class="cgm-tooltip-content">
@@ -8525,10 +10059,10 @@ ${paths}  </svg>
     tooltip.querySelectorAll('.cgm-tooltip-check input[type="checkbox"]').forEach(chk => {
       chk.addEventListener("change", async (e) => {
         e.stopPropagation();
-        const idx = parseInt(chk.dataset.index);
+        const noteId = chk.dataset.noteId;
         const aid = chk.dataset.actorId;
-        await this._archiveActorNote(aid, idx);
-        const noteRow = tooltip.querySelector(`.cgm-tooltip-note[data-index="${idx}"]`);
+        await this._archiveActorNote(aid, noteId);
+        const noteRow = chk.closest(".cgm-tooltip-note");
         if (noteRow) {
           noteRow.style.transition = "opacity 0.2s, transform 0.2s";
           noteRow.style.opacity = "0";
@@ -8545,10 +10079,13 @@ ${paths}  </svg>
 
     // Keep tooltip alive when hovering over it
     tooltip.addEventListener("mouseenter", () => {
-      clearTimeout(this._tooltipTimer);
+      clearTimeout(this._tooltipHideTimer);
     });
     tooltip.addEventListener("mouseleave", () => {
-      this._hideNotesTooltip();
+      this._tooltipHideTimer = setTimeout(() => {
+        this._tooltipHideTimer = null;
+        this._hideNotesTooltip();
+      }, 100);
     });
   }
 
@@ -8557,6 +10094,11 @@ ${paths}  </svg>
       this._tooltipEl.remove();
       this._tooltipEl = null;
     }
+    // Defensive: clear both slots so no pending callback can re-show after hide.
+    clearTimeout(this._tooltipShowTimer);
+    this._tooltipShowTimer = null;
+    clearTimeout(this._tooltipHideTimer);
+    this._tooltipHideTimer = null;
     if (this._tooltipTimer) {
       clearTimeout(this._tooltipTimer);
       this._tooltipTimer = null;
@@ -8688,13 +10230,22 @@ ${paths}  </svg>
 
       // Hover: show notes tooltip (with delay)
       wrap.addEventListener("mouseenter", () => {
-        this._tooltipTimer = setTimeout(() => {
+        // Re-entry cancels a pending hide so the tooltip doesn't flash closed
+        clearTimeout(this._tooltipHideTimer);
+        clearTimeout(this._tooltipShowTimer);
+        this._tooltipShowTimer = setTimeout(() => {
+          this._tooltipShowTimer = null;
           this._showNotesTooltip(actorId, wrap);
         }, 600);
       });
       wrap.addEventListener("mouseleave", () => {
+        // CRITICAL: cancel a pending show — the tooltip must never appear
+        // after the cursor has left the portrait.
+        clearTimeout(this._tooltipShowTimer);
+        this._tooltipShowTimer = null;
         // Delayed hide so user can move mouse to tooltip
-        this._tooltipTimer = setTimeout(() => {
+        this._tooltipHideTimer = setTimeout(() => {
+          this._tooltipHideTimer = null;
           this._hideNotesTooltip();
         }, 150);
       });
@@ -9592,7 +11143,7 @@ ${paths}  </svg>
     if (portraitsBtn) {
       portraitsBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        await this._openPortraitsMenu();
+        await this._openPlayerSettings();
       });
     }
 
@@ -9734,6 +11285,14 @@ ${paths}  </svg>
       window.cypherItemsCanvas.toggle();
     });
 
+    // Gallery Canvas button
+    this.element.querySelector('[data-action="openGalleryCanvas"]')?.addEventListener("click", () => {
+      if (!window.cypherGalleryCanvas) {
+        window.cypherGalleryCanvas = new GalleryCanvas();
+      }
+      window.cypherGalleryCanvas.toggle();
+    });
+
     // Cypher Connections button
     this.element.querySelector('[data-action="openConnections"]')?.addEventListener("click", async () => {
       if (!window.CypherConnections) {
@@ -9749,6 +11308,16 @@ ${paths}  </svg>
         return;
       }
       await window.CypherConnections.openBoard();
+    });
+
+    // Cypher Social button
+    this.element.querySelector('[data-action="openSocial"]')?.addEventListener("click", async () => {
+      if (!window.CypherSocial) {
+        ui.notifications.warn("Cypher Social is not loaded.");
+        return;
+      }
+      // BoardPanel.open() has native toggle — second press closes the panel.
+      await window.CypherSocial.openBoard();
     });
 
     // Quick Scene button
@@ -9785,6 +11354,18 @@ ${paths}  </svg>
     this.element.querySelector('[data-action="openRandomPanel"]')?.addEventListener("click", (e) => {
       this._toggleRandomPanel(e.currentTarget);
     });
+  }
+
+  /** Player answered an intrusion (taskbar banner or fallback dialog). */
+  _logIntrusionOutcome({ actorName, accepted, gaveToName } = {}) {
+    const time = new Date().toLocaleTimeString();
+    const description = accepted
+      ? `Accepted (+2 XP${gaveToName ? `, gave 1 to ${gaveToName}` : ""})`
+      : "Refused (−1 XP)";
+    this._intrusions.unshift({ time, target: actorName || "Unknown", description });
+    if (this._intrusions.length > 50) this._intrusions.pop();
+    ui.notifications.info(`Intrusion ${accepted ? "accepted" : "refused"} — ${actorName || "Unknown"}.`);
+    if (this.element?.querySelector(".cgm-intrusion-actions")) this._openPanel("intrusions");
   }
 
   _bindPanelEvents(key) {
@@ -10142,6 +11723,7 @@ ${paths}  </svg>
             wrap.style.width = `${val}px`;
             wrap.style.height = `${val}px`;
           });
+          this._syncPortraitBgWidth();
           const vd = el.querySelector('[data-action="setPortraitSize"] + .cgm-slider-val');
           if (vd) vd.textContent = `${val}px`;
         });
@@ -10699,6 +12281,13 @@ ${paths}  </svg>
               });
               ownedActors.forEach(actorId => {
                 this._disconnectedActors.add(actorId);
+                this._disconnectionTimes.set(actorId, Date.now());
+                const fadeT = setTimeout(() => {
+                  this._fadeTimeouts.delete(actorId);
+                  // Still away after two minutes — switch flash to faded
+                  if (this._disconnectedActors.has(actorId)) this.render();
+                }, 120000);
+                this._fadeTimeouts.set(actorId, fadeT);
                 this._startDisconnectionSound(actorId);
               });
               if (ownedActors.length) this.render();
@@ -10721,6 +12310,9 @@ ${paths}  </svg>
             });
             ownedActors.forEach(actorId => {
               this._disconnectedActors.delete(actorId);
+              this._disconnectionTimes.delete(actorId);
+              const fadeT = this._fadeTimeouts.get(actorId);
+              if (fadeT) { clearTimeout(fadeT); this._fadeTimeouts.delete(actorId); }
               this._stopDisconnectionSound(actorId);
             });
             if (ownedActors.length) this.render();
@@ -12517,6 +14109,491 @@ ${paths}  </svg>
     });
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  PLAYER TASKS — GM delegation, approval workflow, archive
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Priority config */
+  _ptPriorities() {
+    return {
+      yesterday: { label: "YESTERDAY", color: "#ff4444", icon: "fa-fire" },
+      soon:      { label: "SOON ENOUGH", color: "#ffaa00", icon: "fa-clock" },
+      wait:      { label: "CAN WAIT", color: "#44cc44", icon: "fa-coffee" }
+    };
+  }
+
+  /** Get all player-owned PC actors */
+  _ptPlayerActors() {
+    return game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
+  }
+
+  /** Collect all GM-delegated tasks across all player actors */
+  _collectDelegatedTasks() {
+    const actors = this._ptPlayerActors();
+    const seen = new Map(); // taskId → task + actors
+    for (const actor of actors) {
+      const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
+      for (const t of tasks) {
+        if (t.createdBy !== "gm") continue;
+        if (!seen.has(t.id)) {
+          seen.set(t.id, { ...t, _actorIds: [actor.id], _actorNames: [actor.name] });
+        } else {
+          const existing = seen.get(t.id);
+          existing._actorIds.push(actor.id);
+          existing._actorNames.push(actor.name);
+        }
+      }
+    }
+    return [...seen.values()];
+  }
+
+  /** Toggle the Player Tasks panel */
+  _openPlayerTasksPanel() {
+    document.querySelector("#cgm-pt-wrapper")?.remove();
+
+    const wrapper = document.createElement("div");
+    wrapper.id = "cgm-pt-wrapper";
+    wrapper.style.cssText = "position:fixed;z-index:10002;left:20px;top:50%;transform:translateY(-50%);";
+
+    const panel = document.createElement("div");
+    panel.id = "cgm-pt-panel";
+    panel.className = "cgm-pt-panel";
+    panel.style.cssText = "position:relative;width:600px;max-height:680px;display:flex;flex-direction:column;overflow:hidden;";
+
+    panel.innerHTML = `
+      <div class="cgm-pt-header">
+        <span class="cgm-pt-title"><i class="fas fa-clipboard-list"></i> PLAYER TASKS</span>
+        <div class="cgm-pt-header-actions">
+          <button class="cgm-pt-action" id="cgm-pt-add" title="Create Task"><i class="fas fa-plus"></i></button>
+          <button class="cgm-pt-action" id="cgm-pt-close" title="Close"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+      <div class="cgm-pt-tabs">
+        <button class="cgm-pt-tab is-active" data-tab="active"><i class="fas fa-list"></i> ACTIVE</button>
+        <button class="cgm-pt-tab" data-tab="archive"><i class="fas fa-box-archive"></i> ARCHIVE</button>
+      </div>
+      <div class="cgm-pt-body" id="cgm-pt-list"></div>`;
+
+    wrapper.appendChild(panel);
+    document.body.appendChild(wrapper);
+
+    // Draggable header
+    const header = panel.querySelector(".cgm-pt-header");
+    let isDragging = false, dragX = 0, dragY = 0;
+    header.style.cursor = "grab";
+    header.addEventListener("mousedown", (e) => {
+      if (e.target.closest("button")) return;
+      isDragging = true;
+      const r = wrapper.getBoundingClientRect();
+      dragX = e.clientX - r.left;
+      dragY = e.clientY - r.top;
+      wrapper.style.transform = "none";
+      header.style.cursor = "grabbing";
+    });
+    const onMove = (e) => {
+      if (!isDragging) return;
+      wrapper.style.left = `${e.clientX - dragX}px`;
+      wrapper.style.top = `${e.clientY - dragY}px`;
+    };
+    const onUp = () => { isDragging = false; header.style.cursor = "grab"; };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+
+    requestAnimationFrame(() => panel.classList.add("is-open"));
+
+    const _close = () => {
+      panel.classList.remove("is-open");
+      panel.classList.add("is-closing");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      panel.addEventListener("transitionend", () => wrapper.remove(), { once: true });
+    };
+
+    panel.querySelector("#cgm-pt-close")?.addEventListener("click", (e) => { e.stopPropagation(); _close(); });
+    panel.querySelector("#cgm-pt-add")?.addEventListener("click", (e) => { e.stopPropagation(); this._openGMTaskDelegator(); });
+
+    // Tab switching
+    panel.querySelectorAll(".cgm-pt-tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        panel.querySelectorAll(".cgm-pt-tab").forEach(t => t.classList.remove("is-active"));
+        tab.classList.add("is-active");
+        this._renderPTList(panel.querySelector("#cgm-pt-list"), tab.dataset.tab);
+      });
+    });
+
+    // Initial render
+    this._renderPTList(panel.querySelector("#cgm-pt-list"), "active");
+  }
+
+  /** Render the Player Tasks list into a container */
+  _renderPTList(container, tab = "active") {
+    if (!container) return;
+    const all = this._collectDelegatedTasks();
+    const priorities = this._ptPriorities();
+    const esc = foundry.utils.escapeHTML;
+
+    const filtered = all.filter(t => tab === "archive" ? !!t.solved : !t.solved);
+
+    if (filtered.length === 0) {
+      container.innerHTML = `<div class="cgm-pt-empty"><i class="fas fa-${tab === 'archive' ? 'box-archive' : 'clipboard-list'}"></i><p>No ${tab} tasks.</p></div>`;
+      return;
+    }
+
+    // Sort by priority then newest
+    const prioOrder = { yesterday: 0, soon: 1, wait: 2 };
+    filtered.sort((a, b) => {
+      if (!!a.approvalPending !== !!b.approvalPending) return a.approvalPending ? -1 : 1;
+      const pa = prioOrder[a.priority] ?? 1;
+      const pb = prioOrder[b.priority] ?? 1;
+      if (pa !== pb) return pa - pb;
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    });
+
+    container.innerHTML = filtered.map(task => {
+      const p = priorities[task.priority] || priorities.soon;
+      const isApproval = !!task.approvalPending && !task.solved;
+      const rowClasses = ["cgm-pt-item", isApproval ? "cgm-pt-approval" : ""].filter(Boolean).join(" ");
+      const players = task._actorNames?.join(", ") || "?";
+      return `
+        <div class="${rowClasses}" data-task-id="${task.id}">
+          <div class="cgm-pt-item-priority" style="--ct-prio:${p.color}" title="${p.label}"><i class="fas ${p.icon}"></i></div>
+          <div class="cgm-pt-item-content">
+            <div class="cgm-pt-item-title">${esc(task.name || "Untitled")}
+              ${isApproval ? '<span class="cgm-pt-approval-badge"><i class="fas fa-hourglass-half"></i> AWAITING APPROVAL</span>' : ''}
+            </div>
+            <div class="cgm-pt-item-players"><i class="fas fa-users"></i> ${esc(players)}</div>
+            <div class="cgm-pt-item-meta">
+              <span style="color:${p.color}"><i class="fas ${p.icon}"></i> ${p.label}</span>
+              <span>${task.createdAt ? new Date(task.createdAt).toLocaleDateString() : ""}</span>
+            </div>
+          </div>
+          <div class="cgm-pt-item-actions">
+            ${isApproval ? `
+              <button class="cgm-pt-act cgm-pt-approve" data-approve="${task.id}" title="Approve — mark as solved"><i class="fas fa-check"></i></button>
+              <button class="cgm-pt-act cgm-pt-reject" data-reject="${task.id}" title="Reject — back to active"><i class="fas fa-xmark"></i></button>
+            ` : ''}
+            ${tab === 'archive' ? `
+              <button class="cgm-pt-act cgm-pt-restore" data-restore="${task.id}" title="Restore to active"><i class="fas fa-rotate-left"></i></button>
+            ` : ''}
+            <button class="cgm-pt-act cgm-pt-edit" data-edit="${task.id}" title="Edit"><i class="fas fa-pen"></i></button>
+            <button class="cgm-pt-act cgm-pt-delete" data-delete="${task.id}" title="Delete"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>`;
+    }).join("");
+
+    // Bind actions
+    container.querySelectorAll("[data-approve]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await this._ptUpdateTask(btn.dataset.approve, t => ({ ...t, solved: true, approvalPending: false }));
+        this._renderPTList(container, tab);
+        ui.notifications.info("Task approved and archived.");
+      });
+    });
+
+    container.querySelectorAll("[data-reject]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await this._ptUpdateTask(btn.dataset.reject, t => ({ ...t, approvalPending: false }));
+        this._renderPTList(container, tab);
+        ui.notifications.info("Approval rejected — task back to active.");
+      });
+    });
+
+    container.querySelectorAll("[data-restore]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await this._ptUpdateTask(btn.dataset.restore, t => ({ ...t, solved: false, approvalPending: false }));
+        this._renderPTList(container, tab);
+        ui.notifications.info("Task restored to active.");
+      });
+    });
+
+    container.querySelectorAll("[data-edit]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._openGMTaskDelegator(btn.dataset.edit);
+      });
+    });
+
+    container.querySelectorAll("[data-delete]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const taskId = btn.dataset.delete;
+        const all2 = this._collectDelegatedTasks();
+        const task = all2.find(t => t.id === taskId);
+        if (!task) return;
+        const confirmed = await Dialog.confirm({
+          title: "Delete Task",
+          content: `<p>Delete "<strong>${esc(task.name)}</strong>" from all players?</p>`,
+        });
+        if (!confirmed) return;
+        await this._ptDeleteTask(taskId);
+        this._renderPTList(container, tab);
+        ui.notifications.info(`"${task.name}" deleted.`);
+      });
+    });
+  }
+
+  /** Update a delegated task across all actors that have it */
+  async _ptUpdateTask(taskId, updater) {
+    const actors = this._ptPlayerActors();
+    for (const actor of actors) {
+      const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
+      const idx = tasks.findIndex(t => t.id === taskId);
+      if (idx === -1) continue;
+      tasks[idx] = updater(tasks[idx]);
+      await actor.setFlag("cypher-taskbar", "myTasks", tasks);
+    }
+  }
+
+  /** Delete a delegated task from all actors */
+  async _ptDeleteTask(taskId) {
+    const actors = this._ptPlayerActors();
+    for (const actor of actors) {
+      const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
+      const filtered = tasks.filter(t => t.id !== taskId);
+      if (filtered.length !== tasks.length) {
+        await actor.setFlag("cypher-taskbar", "myTasks", filtered);
+      }
+    }
+  }
+
+  /** Open the GM Task Delegator (create/edit delegated tasks) */
+  _openGMTaskDelegator(editTaskId = null) {
+    document.querySelector("#cgm-pt-form-wrapper")?.remove();
+
+    const priorities = this._ptPriorities();
+    const esc = foundry.utils.escapeHTML;
+    const players = this._ptPlayerActors();
+
+    // For edit: find the existing task
+    let existingTask = null;
+    if (editTaskId) {
+      const all = this._collectDelegatedTasks();
+      existingTask = all.find(t => t.id === editTaskId) || null;
+    }
+
+    const wrapper = document.createElement("div");
+    wrapper.id = "cgm-pt-form-wrapper";
+
+    // Position next to panel
+    const ptPanel = document.querySelector("#cgm-pt-panel");
+    let formLeft = "50%", formTop = "50%", formTransform = "translate(-50%,-50%)";
+    if (ptPanel) {
+      const rect = ptPanel.getBoundingClientRect();
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const fw = 560, fh = 640;
+      if (rect.right + fw + 20 < vw) {
+        formLeft = `${rect.right + 16}px`;
+        formTop = `${Math.max(10, Math.min(rect.top, vh - fh - 10))}px`;
+        formTransform = "none";
+      } else if (rect.left - fw - 20 > 0) {
+        formLeft = `${rect.left - fw - 16}px`;
+        formTop = `${Math.max(10, Math.min(rect.top, vh - fh - 10))}px`;
+        formTransform = "none";
+      }
+    }
+    wrapper.style.cssText = `position:fixed;z-index:10005;left:${formLeft};top:${formTop};transform:${formTransform};`;
+
+    const form = document.createElement("div");
+    form.id = "cgm-pt-form";
+    form.className = "cgm-pt-form";
+    form.style.cssText = "position:relative;width:560px;display:flex;flex-direction:column;overflow:hidden;";
+
+    const selectedActors = existingTask?._actorIds || [];
+
+    form.innerHTML = `
+      <div class="cgm-pt-header" style="cursor:grab">
+        <span class="cgm-pt-title"><i class="fas fa-${existingTask ? 'pen' : 'plus'}"></i> ${existingTask ? 'EDIT' : 'CREATE'} TASK</span>
+        <button class="cgm-pt-action" id="cgm-pt-form-close" title="Close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="cgm-pt-form-body">
+        <label class="cgm-pt-label">
+          <span>Task Name</span>
+          <input type="text" id="cgm-pt-name" value="${esc(existingTask?.name || "")}" placeholder="What needs doing?" maxlength="100">
+        </label>
+        <label class="cgm-pt-label">
+          <span>Priority</span>
+          <div class="cgm-pt-prio-options">
+            ${Object.entries(priorities).map(([key, p]) => `
+              <button type="button" class="cgm-pt-prio-btn ${(existingTask?.priority || 'soon') === key ? 'is-selected' : ''}" data-prio="${key}" style="--ct-prio:${p.color}">
+                <i class="fas ${p.icon}"></i> ${p.label}
+              </button>
+            `).join("")}
+          </div>
+        </label>
+        <label class="cgm-pt-label">
+          <span>Delegate To</span>
+          <div class="cgm-pt-delegate">
+            <label class="cgm-pt-delegate-all">
+              <input type="checkbox" id="cgm-pt-all" ${players.length > 0 && selectedActors.length === players.length ? 'checked' : ''}>
+              <span><i class="fas fa-users"></i> ALL PLAYERS</span>
+            </label>
+            <div class="cgm-pt-player-list">
+              ${players.map(a => `
+                <label class="cgm-pt-player-check">
+                  <input type="checkbox" data-actor-id="${a.id}" ${selectedActors.includes(a.id) ? 'checked' : ''}>
+                  <img src="${a.img || 'icons/svg/mystery-man.svg'}" alt="" draggable="false">
+                  <span>${esc(a.name)}</span>
+                </label>
+              `).join("")}
+            </div>
+          </div>
+        </label>
+        <label class="cgm-pt-label">
+          <span>Details</span>
+          <div class="cgm-pt-wysiwyg-toolbar">
+            <button type="button" data-cmd="bold" title="Bold"><i class="fas fa-bold"></i></button>
+            <button type="button" data-cmd="italic" title="Italic"><i class="fas fa-italic"></i></button>
+            <button type="button" data-cmd="underline" title="Underline"><i class="fas fa-underline"></i></button>
+            <span class="cgm-pt-sep"></span>
+            <button type="button" data-cmd="insertUnorderedList" title="Bullets"><i class="fas fa-list-ul"></i></button>
+            <button type="button" data-cmd="insertOrderedList" title="Numbered"><i class="fas fa-list-ol"></i></button>
+            <span class="cgm-pt-sep"></span>
+            <button type="button" data-cmd="h3" title="Heading"><i class="fas fa-heading"></i></button>
+            <button type="button" data-cmd="removeFormat" title="Clear"><i class="fas fa-eraser"></i></button>
+          </div>
+          <div class="cgm-pt-wysiwyg-editor" id="cgm-pt-desc" contenteditable="true" data-placeholder="Describe the task...">${existingTask?.description || ""}</div>
+        </label>
+      </div>
+      <div class="cgm-pt-form-footer">
+        <button class="cgm-pt-save" id="cgm-pt-save"><i class="fas fa-save"></i> Save</button>
+      </div>`;
+
+    wrapper.appendChild(form);
+    document.body.appendChild(wrapper);
+
+    requestAnimationFrame(() => form.classList.add("is-open"));
+
+    // Draggable
+    let isDragging = false, dragX = 0, dragY = 0;
+    const hdr = form.querySelector(".cgm-pt-header");
+    hdr.addEventListener("mousedown", (e) => {
+      if (e.target.closest("button")) return;
+      isDragging = true;
+      const r = wrapper.getBoundingClientRect();
+      dragX = e.clientX - r.left;
+      dragY = e.clientY - r.top;
+      wrapper.style.transform = "none";
+    });
+    const onMove = (e) => {
+      if (!isDragging) return;
+      wrapper.style.left = `${e.clientX - dragX}px`;
+      wrapper.style.top = `${e.clientY - dragY}px`;
+    };
+    const onUp = () => { isDragging = false; };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+
+    // Priority
+    let selectedPrio = existingTask?.priority || "soon";
+    form.querySelectorAll("[data-prio]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        form.querySelectorAll("[data-prio]").forEach(b => b.classList.remove("is-selected"));
+        btn.classList.add("is-selected");
+        selectedPrio = btn.dataset.prio;
+      });
+    });
+
+    // ALL PLAYERS toggle
+    const allChk = form.querySelector("#cgm-pt-all");
+    allChk?.addEventListener("change", () => {
+      form.querySelectorAll("[data-actor-id]").forEach(cb => { cb.checked = allChk.checked; });
+    });
+    form.querySelectorAll("[data-actor-id]").forEach(cb => {
+      cb.addEventListener("change", () => {
+        const all = [...form.querySelectorAll("[data-actor-id]")].every(c => c.checked);
+        if (allChk) allChk.checked = all;
+      });
+    });
+
+    // WYSIWYG
+    const editor = form.querySelector("#cgm-pt-desc");
+    form.querySelectorAll("[data-cmd]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const cmd = btn.dataset.cmd;
+        editor.focus();
+        if (cmd === "h3") document.execCommand("formatBlock", false, "<h3>");
+        else document.execCommand(cmd, false, null);
+      });
+    });
+
+    const _close = () => {
+      form.classList.remove("is-open");
+      form.classList.add("is-closing");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      form.addEventListener("transitionend", () => wrapper.remove(), { once: true });
+    };
+    form.querySelector("#cgm-pt-form-close")?.addEventListener("click", (e) => { e.stopPropagation(); _close(); });
+
+    form.querySelector("#cgm-pt-save")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const name = form.querySelector("#cgm-pt-name").value.trim();
+      const description = editor.innerHTML.trim();
+      const selectedIds = [...form.querySelectorAll("[data-actor-id]:checked")].map(cb => cb.dataset.actorId);
+
+      if (!name) { ui.notifications.warn("Please enter a task name."); return; }
+      if (selectedIds.length === 0) { ui.notifications.warn("Select at least one player."); return; }
+
+      const taskId = existingTask?.id || foundry.utils.randomID();
+      const taskData = {
+        id: taskId,
+        name,
+        priority: selectedPrio,
+        description,
+        solved: existingTask?.solved ?? false,
+        approvalPending: existingTask?.approvalPending ?? false,
+        createdAt: existingTask?.createdAt || Date.now(),
+        createdBy: "gm",
+        delegatedBy: game.user.name,
+        delegatedTo: selectedIds
+      };
+
+      // Remove from actors no longer selected
+      if (existingTask) {
+        const removed = existingTask._actorIds.filter(id => !selectedIds.includes(id));
+        for (const actorId of removed) {
+          const actor = game.actors.get(actorId);
+          if (!actor) continue;
+          const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
+          const filtered = tasks.filter(t => t.id !== taskId);
+          if (filtered.length !== tasks.length) await actor.setFlag("cypher-taskbar", "myTasks", filtered);
+        }
+      }
+
+      // Write to all selected actors
+      for (const actorId of selectedIds) {
+        const actor = game.actors.get(actorId);
+        if (!actor) continue;
+        const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
+        const idx = tasks.findIndex(t => t.id === taskId);
+        if (idx >= 0) tasks[idx] = { ...tasks[idx], ...taskData };
+        else tasks.push(taskData);
+        await actor.setFlag("cypher-taskbar", "myTasks", tasks);
+      }
+
+      _close();
+      const list = document.querySelector("#cgm-pt-list");
+      if (list) {
+        const activeTab = document.querySelector(".cgm-pt-tab.is-active")?.dataset.tab || "active";
+        this._renderPTList(list, activeTab);
+      }
+      ui.notifications.info(`Task "${name}" ${existingTask ? 'updated' : 'delegated'} to ${selectedIds.length} player${selectedIds.length !== 1 ? 's' : ''}.`);
+    });
+  }
+
+  /** Refresh the Player Tasks panel (called from socket) */
+  _refreshPlayerTasksPanel() {
+    const list = document.querySelector("#cgm-pt-list");
+    if (!list) return;
+    const tab = document.querySelector(".cgm-pt-tab.is-active")?.dataset.tab || "active";
+    this._renderPTList(list, tab);
+  }
+
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -12592,10 +14669,14 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "disconnectionSoundTarget", { name: "Sound Target", hint: "Who should hear the disconnection sound.", scope: "world", config: true, type: String, default: "gm", choices: { gm: "GM Only", all: "All Players", disconnected: "Disconnected Player Only" } });
   game.settings.register(MODULE_ID, "npcCanvasData", { name: "NPC Canvas Data", hint: "Stores NPC canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "enemyCanvasData", { name: "Enemy Canvas Data", hint: "Stores Enemy canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
+  game.settings.register(MODULE_ID, "playerStash", { name: "Player Stash", hint: "UUID reference to the Item Piles container designated as the player stash.", scope: "world", config: false, type: Object, default: {} });
+  game.settings.register(MODULE_ID, "playerSettingsLastMenu", { name: "Player Settings Last Menu", hint: "Last opened submenu in the Player Settings menu.", scope: "client", config: false, type: String, default: "" });
   game.settings.register(MODULE_ID, "itemsCanvasData", { name: "Items Canvas Data", hint: "Stores Items canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
+  game.settings.register(MODULE_ID, "galleryCanvasData", { name: "Gallery Canvas Data", hint: "Stores Gallery canvas tabs and media.", scope: "world", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "menuPositions", { name: "Menu Positions", hint: "Saved positions for draggable radial menus (JSON).", scope: "client", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "gmMenuDocs", { name: "GM Menu Documents", hint: "Journal UUIDs stored in GM menu sections (JSON).", scope: "world", config: false, type: String, default: "{\"shared\":[],\"gm\":[],\"notes\":[]}" });
   game.settings.register(MODULE_ID, "randomPanelData", { name: "Random Panel Data", hint: "Journal entries stored in Random panel grid (JSON array).", scope: "world", config: false, type: String, default: "[]" });
+  game.settings.register(MODULE_ID, "playerSheets", { name: "Player Sheets", hint: "Uploaded HTML character sheets per actor (JSON).", scope: "world", config: false, type: String, default: "{}" });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -12666,12 +14747,35 @@ Hooks.once("ready", () => {
     console.log(`${MODULE_ID} | GM taskbar rendered`);
   }, 500);
 
-  // Listen for Cypher XP player spend requests
+  // Listen for Cypher XP player spend requests + player attack outcomes
   game.socket.on("module.cypher-taskbar", (payload) => {
     console.log(`[CGM] Socket received:`, payload);
-    if (payload?.type === "gmXpSpendRequest" && game.user?.isGM) {
+    if (payload?.type === "intrusionOutcome" && game.user?.isGM) {
+      window.cypherGMTaskbar?._logIntrusionOutcome?.(payload);
+    } else if (payload?.type === "gmXpSpendRequest" && game.user?.isGM) {
       console.log(`[CGM] Handling gmXpSpendRequest for actor:`, payload.actorName);
       window.cypherGMTaskbar?._openGMXpSpendRequest?.(payload);
+    } else if (payload?.type === "gmAttackOutcomeRequest" && game.user?.isGM) {
+      // Player's attack hit an NPC — only the active GM reviews (multi-GM safety).
+      const activeGm = game.users?.activeGM;
+      if (!activeGm || activeGm.id === game.user.id) {
+        console.log(`[CGM] Handling gmAttackOutcomeRequest for target:`, payload.tokenUuid);
+        window.cypherGMTaskbar?._openGMAttackOutcome?.(payload);
+      }
+    } else if (payload?.type === "gmSkillUtilityRequest" && game.user?.isGM) {
+      // Player rolled a skill — only the active GM decides the utility cost.
+      const activeGm = game.users?.activeGM;
+      if (!activeGm || activeGm.id === game.user.id) {
+        console.log(`[CGM] Handling gmSkillUtilityRequest for skill:`, payload.skillName);
+        window.cypherGMTaskbar?._openGMSkillUtility?.(payload);
+      }
+    } else if (payload?.type === "gmOtherPipsRequest" && game.user?.isGM) {
+      // Player declared an "other" action — only the active GM picks the pip cost.
+      const activeGm = game.users?.activeGM;
+      if (!activeGm || activeGm.id === game.user.id) {
+        console.log(`[CGM] Handling gmOtherPipsRequest for actor:`, payload.actorName);
+        window.cypherGMTaskbar?._openGMOtherPips?.(payload);
+      }
     } else {
       console.log(`[CGM] Ignoring socket message. type=${payload?.type}, isGM=${game.user?.isGM}`);
     }
@@ -12860,6 +14964,31 @@ Hooks.on("ready", () => {
     }
 
     console.log("[CypherGMTaskbar] SOCKET EVENT (raw):", data, "| my userId:", game.user?.id);
+
+    // Player Tasks — approval request (GM sees all, no userId filter)
+    if (data?.action === "taskApprovalRequest" && game.user.isGM) {
+      const actorName = data.actorName || "Unknown";
+      const taskName = data.taskName || "Task";
+      ui.notifications.info(`<i class="fas fa-hourglass-half"></i> ${actorName} marked "${taskName}" for approval.`, { permanent: false });
+      // Refresh the Player Tasks panel if open
+      if (window.cypherGMTaskbar) {
+        window.cypherGMTaskbar._refreshPlayerTasksPanel?.();
+      }
+      return;
+    }
+
+    // Gallery media show-to-players broadcast (reaches players —
+    // registered BEFORE the userId filter below, same as taskApprovalRequest).
+    // When data.targets is set, only those users see it; otherwise all players.
+    if (data?.action === "galleryShow" && !game.user.isGM) {
+      if (!data.targets || data.targets.includes(game.user.id)) {
+        if (typeof window.cypherShowGalleryMedia === "function") {
+          window.cypherShowGalleryMedia({ src: data.src, name: data.name, mediaType: data.mediaType });
+        }
+      }
+      return;
+    }
+
     if (data.userId !== game.user?.id) {
       console.log("[CypherGMTaskbar] SKIPPED — wrong userId. Expected:", data.userId, "Got:", game.user?.id);
       return;
@@ -12956,6 +15085,10 @@ Hooks.on("ready", () => {
 
     /* ─── Intrusion ─── */
     else if (data.action === "requestIntrusion") {
+      // Cypher Taskbar (player module) shows its own dramatic portrait
+      // banner — skip this fallback dialog to avoid double prompts.
+      if (game.modules.get("cypher-taskbar")?.active && window.CypherTaskbar?.instance) return;
+
       console.log(`[CypherGMTaskbar] Intrusion request for ${actor.name}`);
       ui.notifications.warn(`GM Intrusion on ${actor.name}!`, { permanent: true });
 
@@ -12990,6 +15123,16 @@ Hooks.on("ready", () => {
         }
       }
       async function _sendIntrusionChat(a, accepted, gaveXPTo = null) {
+        // Report the outcome back to the GM (intrusions panel log)
+        game.socket.emit("module.cypher-taskbar", {
+          type: "intrusionOutcome",
+          actorId: a?.id,
+          actorName: a?.name || "Unknown",
+          userId: game.user.id,
+          userName: game.user.name,
+          accepted,
+          gaveToName: gaveXPTo?.name ?? null
+        });
         const actorImg = a?.img || "icons/svg/mystery-man.svg";
         const actorName = a?.name || "Unknown";
         const acceptedColor = accepted ? "#40b060" : "#ff7070";
@@ -13023,7 +15166,7 @@ Hooks.on("ready", () => {
           <div class="cgm-intrusion-dialog">
             <div class="cgm-intrusion-portrait-bg" style="background-image:url('${img}');"></div>
             <div class="cgm-intrusion-header"><i class="fas fa-bolt" style="margin-right:6px;"></i>GM Intrusion</div>
-            <div class="cgm-intrusion-flavor">Let's make this interesting.</div>
+            <div class="cgm-intrusion-flavor">${data.description ? foundry.utils.escapeHTML(data.description) : "Let's make this interesting."}</div>
             <div class="cgm-intrusion-question">Do you accept GM's <strong>INTRUSION</strong>?</div>
             <div class="cgm-intrusion-target"><i class="fas fa-crosshairs"></i> Target: <strong>${name}</strong></div>
           </div>`,
@@ -13138,12 +15281,29 @@ Hooks.on("updateActor", (actor, data, options, userId) => {
   }, 250);
 });
 
+/* NPC Canvas: keep canvas tokens in sync when an actor's image changes
+ * (portrait or prototype token texture — whichever was edited on the sheet) */
+Hooks.on("updateActor", (actor, data, options, userId) => {
+  if (!game.user?.isGM) return;
+  if (!game.settings.get(MODULE_ID, "npcCanvasData")) return; // canvas never used
+  if (!window.cypherNPCCanvas) window.cypherNPCCanvas = new NPCCanvas();
+  window.cypherNPCCanvas.syncActorImage?.(actor, data);
+});
+
 /* Refresh portraits when items change on actors (cyphers, artifacts) */
 Hooks.on("createItem", (item, options, userId) => {
   if (!game.user?.isGM) return;
   const actor = item.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  // PLAYER ATTACKS sync: a new attack on a PC's sheet joins the pinned list
+  // (no-op while pinning is unused — flag unset means "show all attacks").
+  if (item.type === "attack") {
+    const ids = actor.getFlag?.("cypher-taskbar", "pinnedAttacks");
+    if (Array.isArray(ids) && !ids.includes(item.id)) {
+      actor.setFlag("cypher-taskbar", "pinnedAttacks", [...ids, item.id]).catch(() => {});
+    }
+  }
   if (window.cypherGMTaskbar._partyDataCache) {
     window.cypherGMTaskbar._partyDataCache = null;
   }
@@ -13158,6 +15318,13 @@ Hooks.on("deleteItem", (item, options, userId) => {
   const actor = item.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
+  // PLAYER ATTACKS sync: drop deleted attacks from the pinned list.
+  if (item.type === "attack") {
+    const ids = actor.getFlag?.("cypher-taskbar", "pinnedAttacks");
+    if (Array.isArray(ids) && ids.includes(item.id)) {
+      actor.setFlag("cypher-taskbar", "pinnedAttacks", ids.filter(x => x !== item.id)).catch(() => {});
+    }
+  }
   if (window.cypherGMTaskbar._partyDataCache) {
     window.cypherGMTaskbar._partyDataCache = null;
   }
