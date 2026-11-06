@@ -55,9 +55,7 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
     this._dragOver = false;
     this._dataLoaded = false;
     
-    // Camera state (this._camera = active tab's camera; per-tab views in this._cameras)
     this._camera = { x: 0, y: 0, zoom: 1 };
-    this._cameras = {};
     this._isPanning = false;
     this._panStart = { x: 0, y: 0 };
     this._cameraStart = { x: 0, y: 0 };
@@ -69,17 +67,6 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
     this._showSearchInput = false;
     this._locked = false;
     this._selectedItems = new Set();
-  }
-
-  /* Per-tab camera memory: stash the live camera under the current tab,
-     then adopt the target tab's saved view (default origin/100%). */
-  _cameraFor(tabId) {
-    return this._cameras[tabId] || { x: 0, y: 0, zoom: 1 };
-  }
-
-  _switchTabCamera(newTabId) {
-    this._cameras[this._activeTab] = this._camera;
-    this._camera = { ...this._cameraFor(newTabId) };
   }
 
   toggle() {
@@ -388,7 +375,6 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
     // Reset view
     el.querySelector('.cgm-npc-canvas-reset-view')?.addEventListener('click', () => {
       this._camera = { x: 0, y: 0, zoom: 1 };
-      this._cameras[this._activeTab] = this._camera;
       this.render();
     });
 
@@ -433,8 +419,8 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
         if (e.button !== 0) return;
         const tabId = tab.dataset.tabId;
         if (tabId && tabId !== this._activeTab) {
-          this._switchTabCamera(tabId);
           this._activeTab = tabId;
+          this._camera = { x: 0, y: 0, zoom: 1 };
           this.render();
         }
       });
@@ -681,10 +667,8 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
     this._tabs = this._tabs.filter(t => t.id !== tabId);
     delete this._items[tabId];
     delete this._tabSettings[tabId];
-    delete this._cameras[tabId];
     if (this._activeTab === tabId) {
       this._activeTab = this._tabs[0]?.id || "general";
-      this._camera = { ...this._cameraFor(this._activeTab) };
     }
     await this._saveToFlags();
     this.render();
@@ -1363,10 +1347,8 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
       activeTab: this._activeTab,
       items: this._items,
       tabSettings: this._tabSettings,
-      camera: this._camera,
-      cameras: this._cameras
+      camera: this._camera
     };
-    this._cameras[this._activeTab] = this._camera;
     await game.settings.set("cypher-gm-taskbar", "itemsCanvasData", JSON.stringify(data));
   }
 
@@ -1379,9 +1361,7 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
       if (data.activeTab) this._activeTab = data.activeTab;
       if (data.items) this._items = data.items;
       if (data.tabSettings) this._tabSettings = data.tabSettings;
-      this._cameras = data.cameras || {};
-      const savedCam = this._cameras[this._activeTab];
-      this._camera = savedCam ? { ...savedCam } : (data.camera ? { ...data.camera } : { x: 0, y: 0, zoom: 1 });
+      if (data.camera) this._camera = data.camera;
     } catch (e) {
       console.warn("[ItemsCanvas] Failed to load data:", e);
     }
@@ -1391,7 +1371,6 @@ class ItemsCanvas extends foundry.applications.api.ApplicationV2 {
     if (this._cleanupMouseListeners) this._cleanupMouseListeners();
     this._hideContextMenu();
     this._hideItemTooltip();
-    try { this._saveToFlags(); } catch {}
     return super.close(options);
   }
 }

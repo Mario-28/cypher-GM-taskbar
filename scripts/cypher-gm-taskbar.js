@@ -1,5 +1,5 @@
 /**
- * Cypher GM Taskbar v4.5.185
+ * Cypher GM Taskbar v4.5.166
  * Foundry VTT v13+ | Cypher System
  *
  * GM-only taskbar with combat tracker, intrusions, cyphers, recovery,
@@ -127,6 +127,8 @@ class GMTaskbar {
     this._recoveryChecks = {};
     this._notes = "";
     this._globalDifficulty = 4;
+    this._globalAssets = 0;
+    this._globalHinders = 0;
     this._dock = "bottom";
     this._opacity = 100;
     this._compact = false;
@@ -177,8 +179,6 @@ class GMTaskbar {
     this._portraitVisibilityMode = this._gs("portraitVisibilityMode", "all");
     this._disconnectedActors = new Set();
     this._disconnectionSounds = new Map(); // actorId -> sound instance
-    this._disconnectionTimes = new Map();  // actorId -> Date.now() when marked disconnected
-    this._fadeTimeouts = new Map();        // actorId -> setTimeout for the 2-min fade
     this._notesLineStart = null;
     this._targetPanelEl = null;
     this._targetPanelPos = null;
@@ -222,10 +222,6 @@ class GMTaskbar {
     this._reputationPanelPos = null;
     this._randomPanelEl = null;
     this._randomPanelPos = null;
-    // Dice tray — roll history + quick dice (mirrors Cypher Taskbar dice bar)
-    this._diceHistory = [];
-    this._diceResultsVisible = this._gs("diceResultsVisible", true);
-    this._diceTrayEl = null;
     this._randomPanelUnlocked = false;
     this._groupStatuses = new GroupStatusesMenu(this);
     // Cypher XP integration
@@ -650,22 +646,11 @@ class GMTaskbar {
   /** Player Settings submenu registry — add new submenus here */
   _getPlayerSettingsSubmenus() {
     return [
-      { id: "sheet", icon: "fa-id-card", label: "PLAYER SHEET", render: () => this._buildPlayerSheetHTML(), bind: (el, close) => this._bindPlayerSheet(el, close) },
       { id: "stash", icon: "fa-box-open", label: "PLAYER STASH", render: () => this._buildPlayerStashHTML(), bind: (el, close) => this._bindPlayerStash(el, close) },
       { id: "cyphers", icon: "fa-flask", label: "CYPHERS/ARTIFACTS", render: () => this._buildCypherLimitsHTML(), bind: (el, close) => this._bindCypherLimits(el, close) },
       { id: "spellsperday", icon: "fa-hat-wizard", label: "SPELLS PER DAY", render: () => this._buildSpellsPerDayHTML(), bind: (el, close) => this._bindSpellsPerDay(el, close) },
       { id: "portraits", icon: "fa-portrait", label: "Manage Actor Portraits", render: () => this._buildPortraitsSettingsHTML(), bind: (el, close) => this._bindPortraitsSettings(el, close) },
       { id: "attacks", icon: "fa-swords", label: "PLAYER ATTACKS", render: () => this._buildPlayerAttacksHTML(), bind: (el, close) => this._bindPlayerAttacks(el, close) },
-    ];
-  }
-
-  /** Mood definitions matching the Cypher Taskbar mood portrait system */
-  get _moodDefs() {
-    return [
-      { key: "combat",       icon: "fa-swords",      label: "Combat" },
-      { key: "exploration",  icon: "fa-map",         label: "Exploration" },
-      { key: "social",       icon: "fa-comments",    label: "Social" },
-      { key: "wounded",      icon: "fa-heart-crack", label: "Wounded" }
     ];
   }
 
@@ -694,9 +679,6 @@ class GMTaskbar {
       const portraitAnimFrequency = prefs.portraitAnimFrequency ?? 0;
       const portraitAnimLoops = prefs.portraitAnimLoops ?? 0;
       const isVideo = this._isPortraitVideoPath(customPortraitImage);
-
-      // Mood portraits from cypher-taskbar flag
-      const moodPortraits = actor.getFlag("cypher-taskbar", "moodPortraits") ?? {};
 
       // Build file list HTML
       const fileListHtml = portraitFiles.length
@@ -754,33 +736,6 @@ class GMTaskbar {
                 <button type="button" class="cgm-portraits-add-folder" data-add-folder="${actor.id}" title="Add all images/webm from folder"><i class="fas fa-folder-plus"></i> Add Folder</button>
                 <button type="button" class="cgm-portraits-clear-files" data-clear-files="${actor.id}" title="Clear all files"><i class="fas fa-trash"></i> Clear</button>
               </div>
-            </div>
-
-            <!-- ★ Mood Portraits -->
-            <div class="cgm-portraits-field cgm-mood-field">
-              <div class="cgm-portraits-section-title"><i class="fas fa-star"></i> Mood Portraits</div>
-              <div class="cgm-mood-grid">
-                ${this._moodDefs.map(m => {
-                  const src = moodPortraits[m.key] ?? "";
-                  const video = this._isPortraitVideoPath(src);
-                  return `
-                    <div class="cgm-mood-slot" data-mood="${m.key}">
-                      <div class="cgm-mood-thumb${src ? "" : " cgm-mood-thumb-empty"}" data-mood-thumb="${m.key}">
-                        ${src
-                          ? (video
-                            ? `<video src="${foundry.utils.escapeHTML(src)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class=\\'fas fa-${m.icon}\\'></i>'"></video>`
-                            : `<img src="${foundry.utils.escapeHTML(src)}" alt="${m.label}" onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class=\\'fas fa-${m.icon}\\'></i>'">`)
-                          : `<i class="fas ${m.icon}"></i>`}
-                      </div>
-                      <div class="cgm-mood-label">${m.label}</div>
-                      <div class="cgm-mood-actions">
-                        <button type="button" class="cgm-mood-browse" data-mood-browse="${m.key}" data-actor-id="${actor.id}" title="Browse for ${m.label} image/webm"><i class="fas fa-folder-open"></i></button>
-                        <button type="button" class="cgm-mood-clear${src ? "" : " cgm-portraits-hidden"}" data-mood-clear="${m.key}" title="Clear ${m.label}"><i class="fas fa-times"></i></button>
-                      </div>
-                    </div>`;
-                }).join("")}
-              </div>
-              <div class="cgm-portraits-file-hint">Mood portraits appear in Cypher Taskbar. Players switch moods via the mood bar below their portrait.</div>
             </div>
 
             <!-- Animation settings -->
@@ -1037,49 +992,6 @@ class GMTaskbar {
       });
     });
 
-    // ── Mood portrait browse buttons ──
-    container.querySelectorAll('[data-mood-browse]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const moodKey = btn.dataset.moodBrowse;
-        const actorId = btn.dataset.actorId;
-        const pane = container.querySelector(`.cgm-portraits-pane[data-actor-id="${actorId}"]`);
-        if (!pane) return;
-        const slot = pane.querySelector(`.cgm-mood-slot[data-mood="${moodKey}"]`);
-        const thumb = slot?.querySelector('[data-mood-thumb]');
-        const clearBtn = slot?.querySelector('[data-mood-clear]');
-        const moodDef = this._moodDefs.find(m => m.key === moodKey);
-
-        const fp = new FilePicker({
-          type: "imagevideo",
-          callback: (path) => {
-            if (!path || !thumb) return;
-            thumb.classList.remove('cgm-mood-thumb-empty');
-            const isVideo = this._isPortraitVideoPath(path);
-            thumb.innerHTML = isVideo
-              ? `<video src="${foundry.utils.escapeHTML(path)}" autoplay loop muted playsinline onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class="fas ${moodDef?.icon ?? 'fa-image'}"></i>'"></video>`
-              : `<img src="${foundry.utils.escapeHTML(path)}" alt="${moodDef?.label ?? ''}" onerror="this.parentElement.classList.add('cgm-mood-thumb-empty');this.parentElement.innerHTML='<i class="fas ${moodDef?.icon ?? 'fa-image'}"></i>'">`;
-            clearBtn?.classList.remove('cgm-portraits-hidden');
-          }
-        });
-        await fp.browse();
-      });
-    });
-
-    // ── Mood portrait clear buttons ──
-    container.querySelectorAll('[data-mood-clear]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const moodKey = btn.dataset.moodClear;
-        const slot = btn.closest('.cgm-mood-slot');
-        const thumb = slot?.querySelector('[data-mood-thumb]');
-        const moodDef = this._moodDefs.find(m => m.key === moodKey);
-        if (thumb) {
-          thumb.classList.add('cgm-mood-thumb-empty');
-          thumb.innerHTML = `<i class="fas ${moodDef?.icon ?? 'fa-image'}"></i>`;
-        }
-        btn.classList.add('cgm-portraits-hidden');
-      });
-    });
-
     // ── Save button ──
     container.querySelector('[data-action="savePortraits"]')?.addEventListener('click', async () => {
       let saved = 0;
@@ -1113,26 +1025,6 @@ class GMTaskbar {
 
         try {
           await actor.setFlag("cypher-taskbar", "taskbarPrefs", prefs);
-
-          // Save mood portraits to the cypher-taskbar moodPortraits flag
-          const moodSlots = pane.querySelectorAll('.cgm-mood-slot');
-          const moodPortraits = {};
-          moodSlots.forEach(slot => {
-            const key = slot.dataset.mood;
-            const thumb = slot.querySelector('[data-mood-thumb]');
-            const media = thumb?.querySelector('img, video');
-            const src = media?.getAttribute('src') || '';
-            if (src) moodPortraits[key] = src;
-          });
-          const existingMoodPortraits = actor.getFlag("cypher-taskbar", "moodPortraits") ?? {};
-          const hasAny = Object.keys(moodPortraits).length > 0;
-          const hadAny = Object.keys(existingMoodPortraits).length > 0;
-          if (hasAny) {
-            await actor.setFlag("cypher-taskbar", "moodPortraits", moodPortraits);
-          } else if (hadAny) {
-            await actor.unsetFlag("cypher-taskbar", "moodPortraits");
-          }
-
           saved++;
         } catch (err) {
           console.error(`[CGM] Failed to save portrait settings for ${actor.name}:`, err);
@@ -1321,185 +1213,6 @@ class GMTaskbar {
     const tokenMatch = /^Scene\.([^.]+)\.Token\.([^.]+)$/.exec(uuid);
     if (tokenMatch) return game.scenes.get(tokenMatch[1])?.tokens?.get(tokenMatch[2]) ?? null;
     return null;
-  }
-
-  /** Get uploaded player sheets map: { [actorId]: { html, name, uploadedAt } } */
-  _getPlayerSheets() {
-    try {
-      return JSON.parse(game.settings.get(MODULE_ID, "playerSheets") || "{}");
-    } catch { return {}; }
-  }
-
-  /** Save player sheets map */
-  async _savePlayerSheets(data) {
-    await game.settings.set(MODULE_ID, "playerSheets", JSON.stringify(data));
-  }
-
-  /** Build the PLAYER SHEET submenu content — per-actor tabs with HTML upload */
-  _buildPlayerSheetHTML() {
-    const actors = game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
-    if (!actors.length) {
-      return `<div class="cgm-ps-empty"><i class="fas fa-user-slash"></i> No player-owned PCs found.</div>`;
-    }
-    actors.sort((a, b) => a.name.localeCompare(b.name));
-    const sheets = this._getPlayerSheets();
-
-    let tabsHtml = "";
-    let panesHtml = "";
-
-    for (let i = 0; i < actors.length; i++) {
-      const actor = actors[i];
-      const isActive = i === 0 ? " is-active" : "";
-      const sheet = sheets[actor.id];
-      const hasSheet = !!sheet?.html;
-      const sheetName = sheet?.name || "";
-      const uploadedAt = sheet?.uploadedAt ? new Date(sheet.uploadedAt).toLocaleString() : "";
-      const htmlSize = sheet?.html ? (new TextEncoder().encode(sheet.html).length / 1024).toFixed(1) : "0";
-
-      tabsHtml += `
-        <button class="cgm-portraits-tab${isActive}" data-actor-id="${actor.id}" type="button">
-          <img src="${actor.img || "icons/svg/mystery-man.svg"}" alt="${actor.name}">
-          <span>${actor.name}</span>
-        </button>`;
-
-      panesHtml += `
-        <div class="cgm-portraits-pane${isActive}" data-actor-id="${actor.id}">
-          <div class="cgm-ps-sheet-area" data-actor-id="${actor.id}">
-            ${hasSheet ? `
-              <div class="cgm-ps-sheet-info">
-                <div class="cgm-ps-sheet-icon"><i class="fas fa-file-code"></i></div>
-                <div class="cgm-ps-sheet-meta">
-                  <div class="cgm-ps-sheet-name">${foundry.utils.escapeHTML(sheetName)}</div>
-                  <div class="cgm-ps-sheet-detail">${htmlSize} KB · uploaded ${uploadedAt}</div>
-                </div>
-                <div class="cgm-ps-sheet-actions">
-                  <button type="button" class="cgm-ps-sheet-btn cgm-ps-sheet-view" data-view-sheet="${actor.id}" title="Preview sheet"><i class="fas fa-eye"></i></button>
-                  <button type="button" class="cgm-ps-sheet-btn cgm-ps-sheet-delete" data-delete-sheet="${actor.id}" title="Remove sheet"><i class="fas fa-trash"></i></button>
-                </div>
-              </div>
-            ` : `
-              <div class="cgm-ps-sheet-empty">
-                <i class="fas fa-cloud-upload-alt"></i>
-                <div class="cgm-ps-sheet-empty-text">No sheet uploaded</div>
-                <div class="cgm-ps-sheet-empty-hint">Upload an HTML character sheet for ${foundry.utils.escapeHTML(actor.name)}</div>
-              </div>
-            `}
-            <div class="cgm-ps-sheet-upload-row">
-              <input type="file" accept=".html,.htm" class="cgm-ps-sheet-file-input" data-sheet-input="${actor.id}" style="display:none;">
-              <button type="button" class="cgm-ps-sheet-upload-btn" data-upload-sheet="${actor.id}">
-                <i class="fas fa-upload"></i> ${hasSheet ? "Replace Sheet" : "Upload Sheet"}
-              </button>
-            </div>
-          </div>
-        </div>`;
-    }
-
-    return `
-      <div class="cgm-portraits-tabs" data-role="sheet-tabs">
-        ${tabsHtml}
-      </div>
-      <div class="cgm-portraits-panes" data-role="sheet-panes">
-        ${panesHtml}
-      </div>`;
-  }
-
-  /** Bind events for the PLAYER SHEET submenu */
-  _bindPlayerSheet(container) {
-    // Actor tab switching
-    container.querySelectorAll(".cgm-portraits-tab").forEach(tab => {
-      tab.addEventListener("click", () => {
-        container.querySelectorAll(".cgm-portraits-tab").forEach(t => t.classList.remove("is-active"));
-        container.querySelectorAll(".cgm-portraits-pane").forEach(p => p.classList.remove("is-active"));
-        tab.classList.add("is-active");
-        container.querySelector(`.cgm-portraits-pane[data-actor-id="${tab.dataset.actorId}"]`)?.classList.add("is-active");
-      });
-    });
-
-    // Upload button → trigger hidden file input
-    container.querySelectorAll("[data-upload-sheet]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const actorId = btn.dataset.uploadSheet;
-        container.querySelector(`[data-sheet-input="${actorId}"]`)?.click();
-      });
-    });
-
-    // File input change → read HTML → store
-    container.querySelectorAll("[data-sheet-input]").forEach(input => {
-      input.addEventListener("change", async () => {
-        const actorId = input.dataset.sheetInput;
-        const file = input.files?.[0];
-        if (!file) return;
-
-        // Validate type
-        if (!file.name.match(/\.html?$/i)) {
-          ui.notifications.warn("Please select an .html or .htm file.");
-          return;
-        }
-
-        // Size check — warn over 500KB
-        if (file.size > 500 * 1024) {
-          ui.notifications.warn(`File is ${(file.size / 1024).toFixed(0)}KB — large sheets may slow down the game. Consider optimizing.`);
-        }
-
-        try {
-          const text = await file.text();
-          const sheets = this._getPlayerSheets();
-          sheets[actorId] = {
-            html: text,
-            name: file.name,
-            uploadedAt: Date.now()
-          };
-          await this._savePlayerSheets(sheets);
-          ui.notifications.info(`Sheet uploaded for ${game.actors.get(actorId)?.name ?? "actor"}.`);
-
-          // Refresh the player settings menu
-          const menu = this._playerSettingsMenu;
-          if (menu?.rendered) { await menu.render({ force: true }); menu._anchorAboveButton(); }
-        } catch (err) {
-          console.error(`${MODULE_ID} | Sheet upload failed:`, err);
-          ui.notifications.error("Failed to upload sheet.");
-        }
-      });
-    });
-
-    // View / preview sheet
-    container.querySelectorAll("[data-view-sheet]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const actorId = btn.dataset.viewSheet;
-        const sheet = this._getPlayerSheets()[actorId];
-        if (!sheet?.html) return;
-        // Open preview in a new window/tab via blob
-        const blob = new Blob([sheet.html], { type: "text/html" });
-        const url = URL.createObjectURL(blob);
-        window.open(url, "_blank");
-        // Clean up the object URL after a delay
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-      });
-    });
-
-    // Delete sheet
-    container.querySelectorAll("[data-delete-sheet]").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        const actorId = btn.dataset.deleteSheet;
-        const actorName = game.actors.get(actorId)?.name ?? "actor";
-        const confirmed = await foundry.applications.api.DialogV2.confirm({
-          window: { title: "Remove Sheet" },
-          content: `<p>Remove the uploaded sheet for <strong>${foundry.utils.escapeHTML(actorName)}</strong>?</p>`,
-          rejectButton: "Cancel",
-          modal: true
-        });
-        if (!confirmed) return;
-
-        const sheets = this._getPlayerSheets();
-        delete sheets[actorId];
-        await this._savePlayerSheets(sheets);
-        ui.notifications.info(`Sheet removed for ${actorName}.`);
-
-        // Refresh the player settings menu
-        const menu = this._playerSettingsMenu;
-        if (menu?.rendered) { await menu.render({ force: true }); menu._anchorAboveButton(); }
-      });
-    });
   }
 
   /** Build the PLAYER STASH submenu content (drop zone + linked pile card) */
@@ -2524,7 +2237,7 @@ class GMTaskbar {
      (editable) and the attack item's Active Effects (checked by default);
      CONFIRM applies with GM permissions and notifies the requesting player,
      CANCEL drops everything and notifies too. */
-  async _openGMAttackOutcome({ userId, tokenUuid, itemUuid, totalDamage, armorReduction } = {}) {
+  async _openGMAttackOutcome({ userId, tokenUuid, itemUuid, totalDamage } = {}) {
     if (!game.user?.isGM) return;
     let tokenDoc = null;
     try { tokenDoc = await fromUuid(tokenUuid); } catch { /* token gone */ }
@@ -2536,12 +2249,7 @@ class GMTaskbar {
     let item = null;
     if (itemUuid) { try { item = await fromUuid(itemUuid); } catch { /* item gone */ } }
     const attackerName = game.users?.get(userId)?.name ?? "Player";
-    // Armor reduction (CCI ARMOR REDUCTION on the attack item, 0-5): effective
-    // armor = max(0, targetArmor - reduction), never below 0.
-    const cciRed = Math.max(0, Math.min(5, Number(item?.getFlag?.("cypher-cool-items", "data")?.armorReduction) || 0));
-    const red = Number.isFinite(armorReduction) ? Math.max(0, Math.min(5, armorReduction)) : cciRed;
-    const rawArmor = this._npcArmorRating(target);
-    const armor = Math.max(0, rawArmor - red);
+    const armor = this._npcArmorRating(target);
     const rolled = Math.round(Number(totalDamage) || 0);
     const applied = Math.max(0, rolled - armor);
     const effects = (item?.effects?.contents ?? []).filter(e => e && !e.disabled);
@@ -2570,7 +2278,7 @@ class GMTaskbar {
             </div>
             <div class="cgm-attack-outcome-badges">
               <span class="cgm-attack-outcome-badge">Rolled Damage: ${rolled}</span>
-              <span class="cgm-attack-outcome-badge">NPC Armor: ${armor}${red > 0 ? ` (−${red} reduction)` : ''}</span>
+              <span class="cgm-attack-outcome-badge">NPC Armor: ${armor}</span>
               ${item ? `<span class="cgm-attack-outcome-badge">${esc(item.name)}</span>` : ""}
             </div>
             <label class="cgm-attack-outcome-dmg">
@@ -2919,6 +2627,9 @@ class GMTaskbar {
     if (game.settings.settings.has("cyphersystem.rollDifficulty")) {
       game.settings.set("cyphersystem", "rollDifficulty", this._globalDifficulty);
     }
+    // Global asset/hindrance layer — world-scoped, read by players' Cypher Taskbar
+    this._globalAssets = Math.max(0, Math.min(2, Number(game.settings.get(MODULE_ID, "globalAssets") ?? 0) || 0));
+    this._globalHinders = Math.max(0, Math.min(6, Number(game.settings.get(MODULE_ID, "globalHinders") ?? 0) || 0));
     this._locked = this._gs("locked", true);
     this._portraitPosition = this._gs("portraitPosition", "left");
     this._portraitSize = this._gs("portraitSize", 48);
@@ -2991,7 +2702,6 @@ class GMTaskbar {
     if (this._buttonObserver) { this._buttonObserver.disconnect(); this._buttonObserver = null; }
     document.querySelector(`#${MODULE_ID}-bar`)?.remove();
     document.querySelector(`.cgm-panel`)?.remove();
-    document.querySelector(`.cgm-dice-tray`)?.remove();
     document.querySelector(`.cgm-portraits-bg-wrap`)?.remove();
     if (this._connInterval) clearInterval(this._connInterval);
     if (this._playerMonitorInterval) clearInterval(this._playerMonitorInterval);
@@ -3021,9 +2731,6 @@ class GMTaskbar {
 
     // Create portrait background panel as separate element (behind bar)
     this._createPortraitBg();
-
-    // Create floating dice tray above bar (left corner)
-    this._createDiceTray();
 
     this._applySettings();
     this._bindEvents();
@@ -3074,6 +2781,63 @@ class GMTaskbar {
     box.title = 'Global Difficulty (TN ' + (this._globalDifficulty * 3) + ')';
   }
 
+  /* Effective GM asset/hinder for one actor: per-portrait flag PLUS the
+     party-wide global layer, each clamped to rules caps (2 assets / 6
+     hinders). This is the number the PC's roll dialogs will show. */
+  _effectiveAH(actor) {
+    const flagA = Math.max(0, Math.min(2, Number(actor?.getFlag("cypher-gm-taskbar", "gmAssets") ?? 0) || 0));
+    const flagH = Math.max(0, Math.min(6, Number(actor?.getFlag("cypher-gm-taskbar", "gmHinders") ?? 0) || 0));
+    return {
+      assets: Math.max(0, Math.min(2, flagA + (this._globalAssets || 0))),
+      hinders: Math.max(0, Math.min(6, flagH + (this._globalHinders || 0)))
+    };
+  }
+
+  /* Update the party-wide asset/hindrance strip in place (no re-render) */
+  _updateGlobalAHStrip() {
+    if (!this.element) return;
+    const strip = this.element.querySelector('.cgm-global-ah');
+    if (!strip) return;
+    const aBtn = strip.querySelector('[data-gah="asset"]');
+    const hBtn = strip.querySelector('[data-gah="hinder"]');
+    const rBtn = strip.querySelector('[data-gah-reset]');
+    if (aBtn) {
+      aBtn.querySelector('.cgm-gah-count')?.replaceChildren(document.createTextNode(String(this._globalAssets)));
+      aBtn.classList.toggle('cgm-gah-on', this._globalAssets > 0);
+    }
+    if (hBtn) {
+      hBtn.querySelector('.cgm-gah-count')?.replaceChildren(document.createTextNode(String(this._globalHinders)));
+      hBtn.classList.toggle('cgm-gah-on', this._globalHinders > 0);
+    }
+    if (rBtn) rBtn.classList.toggle('cgm-gah-idle', this._globalAssets === 0 && this._globalHinders === 0);
+  }
+
+  /* Adjust the party-wide asset/hindrance layer (left-click +1, right-click −1).
+     Written to world settings so players' Cypher Taskbars pick it up. */
+  async _adjustGlobalAH(kind, delta) {
+    const cap = kind === "asset" ? 2 : 6;
+    const key = kind === "asset" ? "_globalAssets" : "_globalHinders";
+    const next = Math.max(0, Math.min(cap, (this[key] || 0) + delta));
+    if (next === this[key]) return;
+    this[key] = next;
+    try { await game.settings.set(MODULE_ID, kind === "asset" ? "globalAssets" : "globalHinders", next); } catch (e) {}
+    this._updateGlobalAHStrip();
+    this._refreshPortraits(); // portrait pills show effective (flag+global) values
+    this._updateOpenRollDialogs();
+  }
+
+  /* Reset the party-wide layer to 0. Per-portrait pills are NOT touched. */
+  async _resetGlobalAH() {
+    if ((this._globalAssets || 0) === 0 && (this._globalHinders || 0) === 0) return;
+    this._globalAssets = 0;
+    this._globalHinders = 0;
+    try { await game.settings.set(MODULE_ID, "globalAssets", 0); } catch (e) {}
+    try { await game.settings.set(MODULE_ID, "globalHinders", 0); } catch (e) {}
+    this._updateGlobalAHStrip();
+    this._refreshPortraits();
+    this._updateOpenRollDialogs();
+  }
+
   /* ─── Button Definitions ─── */
   _getButtonDefs() {
     const staticBtns = [
@@ -3085,7 +2849,6 @@ class GMTaskbar {
       { id: "npc", action: "openNPCCanvas", icon: "fa-users", color: "", title: "NPC Canvas", defaultSection: 1 },
       { id: "enemy", action: "openEnemyCanvas", icon: "fa-tooth", color: "#cc3333", title: "Enemy Canvas", defaultSection: 1 },
       { id: "items", action: "openItemsCanvas", icon: "fa-hammer", color: "", title: "Items", defaultSection: 1 },
-      { id: "gallery", action: "openGalleryCanvas", icon: "fa-photo-film", color: "", title: "Gallery", defaultSection: 1 },
       { id: "reputation", action: "openReputation", icon: "fa-handshake", color: "#e8a87c", title: "Reputation and gossips", defaultSection: 1 },
       { id: "random", action: "openRandomPanel", icon: "fa-globe", color: "#8a6de9", title: "Random", defaultSection: 1 },
       { id: "connections", action: "openConnections", icon: "fa-project-diagram", color: "#c9a227", title: "Connections", defaultSection: 1, requiresModule: "cypher-connections" },
@@ -3309,6 +3072,19 @@ class GMTaskbar {
 
         <!-- Global Difficulty Box -->
         <div class="cgm-difficulty-box" title="Global Difficulty (TN ${tn})">
+          <!-- Party-wide Asset/Hindrance controls (rendered above the box via CSS) -->
+          <div class="cgm-global-ah" title="Party-wide Asset/Hindrance — applied to EVERY PC, stacking with the portrait pills">
+            <span class="cgm-gah-tag"><i class="fas fa-users"></i></span>
+            <button type="button" class="cgm-gah-pill cgm-gah-asset${this._globalAssets > 0 ? ' cgm-gah-on' : ''}" data-gah="asset" title="Global Asset — eases EVERY PC's rolls (max 2, stacks with portrait pills). Left-click +1 · Right-click −1">
+              <b>A</b><span class="cgm-gah-count">${this._globalAssets}</span>
+            </button>
+            <button type="button" class="cgm-gah-reset${this._globalAssets === 0 && this._globalHinders === 0 ? ' cgm-gah-idle' : ''}" data-gah-reset title="Reset the party-wide asset & hindrance to 0 (portrait pills are untouched)">
+              <i class="fas fa-rotate-left"></i>
+            </button>
+            <button type="button" class="cgm-gah-pill cgm-gah-hinder${this._globalHinders > 0 ? ' cgm-gah-on' : ''}" data-gah="hinder" title="Global Hindrance — complicates EVERY PC's rolls (max 6, stacks with portrait pills). Left-click +1 · Right-click −1">
+              <b>H</b><span class="cgm-gah-count">${this._globalHinders}</span>
+            </button>
+          </div>
           <button class="cgm-diff-btn cgm-diff-minus" data-action="globalDiffDown" title="Lower difficulty">
             <i class="fas fa-minus"></i>
           </button>
@@ -3465,28 +3241,13 @@ class GMTaskbar {
     `;
   }
 
-  /* Sync portrait background geometry to match float content:
-     width always; height on the portrait side follows the actual
-     portrait row (portrait size, name-above, effect icons), while the
-     opposite side keeps the CSS extension behind the bar. */
+  /* Sync portrait background width to match float content */
   _syncPortraitBgWidth() {
     if (!this.element) return;
     const float = this.element.querySelector('.cgm-portraits-float');
     const bgWrap = document.querySelector('.cgm-portraits-bg-wrap');
-    const bg = bgWrap?.querySelector('.cgm-portraits-bg');
-    if (!float || !bgWrap || !bg) return;
-    bgWrap.style.width = float.offsetWidth + 'px';
-    const fr = float.getBoundingClientRect();
-    const wr = bgWrap.getBoundingClientRect();
-    const margin = 8;
-    if (this._dock === 'top') {
-      // Top dock: bg bottom follows portraits; top stays CSS (behind bar)
-      bg.style.bottom = (wr.bottom - fr.bottom - margin) + 'px';
-      bg.style.top = '';
-    } else {
-      // Bottom dock: bg top follows portraits; bottom stays CSS (behind bar)
-      bg.style.top = (fr.top - wr.top - margin) + 'px';
-      bg.style.bottom = '';
+    if (float && bgWrap) {
+      bgWrap.style.width = float.offsetWidth + 'px';
     }
   }
 
@@ -3512,144 +3273,6 @@ class GMTaskbar {
 
     // Sync width after portraits render
     this._syncPortraitBgWidth();
-  }
-
-  /* ═══════════════════════════════════════════
-     DICE TRAY — floating quick-dice + roll history
-     (mirrors Cypher Taskbar dice bar, GM-side)
-     ═══════════════════════════════════════════ */
-
-  _createDiceTray() {
-    const tray = document.createElement('div');
-    tray.id = 'cgm-dice-tray';
-    tray.className = `cgm-dice-tray cgm-dice-tray-${this._dock}`;
-    tray.innerHTML = this._buildDiceTrayHTML();
-    document.body.appendChild(tray);
-    this._diceTrayEl = tray;
-    this._bindDiceTrayEvents();
-    this._renderDiceHistory();
-  }
-
-  _buildDiceTrayHTML() {
-    const visIcon = this._diceResultsVisible ? 'fa-eye' : 'fa-eye-slash';
-    const visCls = this._diceResultsVisible ? '' : ' cgm-dice-history-hidden';
-    return `
-      <div class="cgm-dice-tray-inner">
-        <div class="cgm-dice-tray-buttons">
-          <button class="cgm-dice-btn" data-die="d100" title="Roll d100">
-            <i class="fa-solid fa-percent"></i>
-          </button>
-          <button class="cgm-dice-btn" data-die="d6" title="Roll d6">
-            <i class="fa-solid fa-dice-six"></i>
-          </button>
-          <button class="cgm-dice-btn" data-die="d10" title="Roll d10">
-            <i class="fa-solid fa-dice-d10"></i>
-          </button>
-          <button class="cgm-dice-btn" data-die="d20" title="Roll d20">
-            <i class="fa-solid fa-dice-d20"></i>
-          </button>
-        </div>
-        <button class="cgm-dice-toggle" title="${this._diceResultsVisible ? 'Hide' : 'Show'} roll results">
-          <i class="fas ${visIcon}"></i>
-        </button>
-      </div>
-      <div class="cgm-dice-history${visCls}"></div>
-    `;
-  }
-
-  _bindDiceTrayEvents() {
-    if (!this._diceTrayEl) return;
-
-    // Dice buttons
-    this._diceTrayEl.querySelectorAll('.cgm-dice-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await this._rollTrayDie(btn.dataset.die);
-      });
-    });
-
-    // Toggle results visibility
-    this._diceTrayEl.querySelector('.cgm-dice-toggle')?.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this._diceResultsVisible = !this._diceResultsVisible;
-      await this._ss('diceResultsVisible', this._diceResultsVisible);
-      this._updateDiceTrayToggle();
-    });
-  }
-
-  _updateDiceTrayToggle() {
-    if (!this._diceTrayEl) return;
-    const toggle = this._diceTrayEl.querySelector('.cgm-dice-toggle');
-    if (toggle) {
-      toggle.title = `${this._diceResultsVisible ? 'Hide' : 'Show'} roll results`;
-      const icon = toggle.querySelector('i');
-      if (icon) icon.className = `fas ${this._diceResultsVisible ? 'fa-eye' : 'fa-eye-slash'}`;
-    }
-    const hist = this._diceTrayEl.querySelector('.cgm-dice-history');
-    if (hist) hist.classList.toggle('cgm-dice-history-hidden', !this._diceResultsVisible);
-  }
-
-  async _rollTrayDie(die) {
-    if (!die) return;
-    try {
-      const roll = new Roll(`1${die}`);
-      await roll.evaluate();
-      await roll.toMessage({ speaker: ChatMessage.getSpeaker() });
-      this._recordTrayRoll({
-        type: 'dice',
-        label: die,
-        total: Number(roll.total ?? 0),
-        detail: '',
-        tooltip: `${die} — Rolled ${roll.total}`,
-        flavor: `<p><strong>${die}</strong> — Rolled ${roll.total}</p>`,
-        success: null
-      });
-    } catch (err) {
-      console.error(`${MODULE_ID} | Dice roll failed:`, err);
-      ui.notifications.error('Dice roll failed.');
-    }
-  }
-
-  _recordTrayRoll(entry) {
-    this._diceHistory.unshift({ ...entry, ts: Date.now() });
-    if (this._diceHistory.length > 8) this._diceHistory.length = 8;
-    this._renderDiceHistory();
-  }
-
-  _renderDiceHistory() {
-    if (!this._diceTrayEl) return;
-    const hist = this._diceTrayEl.querySelector('.cgm-dice-history');
-    if (!hist) return;
-    hist.innerHTML = this._diceHistory.map((r, i) => this._buildDiceChip(r, i)).join('');
-    // Bind chip clicks to re-announce
-    hist.querySelectorAll('.cgm-dice-chip').forEach(chip => {
-      chip.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const idx = parseInt(chip.dataset.chipIndex);
-        await this._announceTrayRoll(this._diceHistory[idx]);
-      });
-    });
-  }
-
-  _buildDiceChip(entry, idx) {
-    const cls = entry.success === true ? ' cgm-chip-hit' : entry.success === false ? ' cgm-chip-miss' : '';
-    const icon = entry.type === 'attack' ? 'fa-sword' : entry.type === 'skill' ? 'fa-graduation-cap' : entry.type === 'attribute' ? 'fa-person-running' : 'fa-dice-d20';
-    return `<button class="cgm-dice-chip${cls}" data-chip-index="${idx}" title="${foundry.utils.escapeHTML(entry.tooltip)}">
-      <i class="fas ${icon}"></i>
-      <span class="cgm-chip-total">${entry.total}</span>
-      ${entry.detail ? `<span class="cgm-chip-detail">${foundry.utils.escapeHTML(entry.detail)}</span>` : ''}
-    </button>`;
-  }
-
-  async _announceTrayRoll(entry) {
-    if (!entry) return;
-    await ChatMessage.create({
-      speaker: ChatMessage.getSpeaker(),
-      content: `<div class="cgm-reroll-flavor"><em style="opacity:0.7;font-size:0.85em;"><i class="fas fa-rotate-left"></i> Re-announced roll:</em></div>${entry.flavor}`
-    });
   }
 
   /* ─── Floating Portraits (above bar, left side) ─── */
@@ -3718,16 +3341,26 @@ class GMTaskbar {
           const recoveryDrops = this._buildRecoveryDrops(pc.recoveryRolls);
           const actor = game.actors.get(pc.id);
           const individualDiff = actor?.getFlag("cypher-gm-taskbar", "targetDifficulty") ?? 0;
+          const flagA = Math.max(0, Math.min(2, Number(actor?.getFlag("cypher-gm-taskbar", "gmAssets") ?? 0) || 0));
+          const flagH = Math.max(0, Math.min(6, Number(actor?.getFlag("cypher-gm-taskbar", "gmHinders") ?? 0) || 0));
+          const gmEff = this._effectiveAH(actor);
+          const gmAssets = gmEff.assets;
+          const gmHinders = gmEff.hinders;
+          const gaNote = (this._globalAssets || 0) > 0 ? ` · incl. +${this._globalAssets} global` : "";
+          const ghNote = (this._globalHinders || 0) > 0 ? ` · incl. +${this._globalHinders} global` : "";
           const isDisconnected = this._disconnectedActors?.has(pc.id);
-          const awayMs = this._disconnectionTimes?.get(pc.id);
-          const isAway = isDisconnected && awayMs && (Date.now() - awayMs) >= 120000;
           const isActive = this._isActorOwnerActive(pc.id);
           return `
-          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isAway ? 'cgm-portrait-away' : isDisconnected ? 'cgm-portrait-disconnected' : ''} ${isActive ? 'cgm-portrait-active' : ''}" data-actor-id="${pc.id}">
+          <div class="cgm-portrait-wrap ${nameAbove ? 'cgm-portrait-name-above' : ''} ${isDisconnected ? 'cgm-portrait-disconnected' : ''} ${isActive ? 'cgm-portrait-active' : ''}" data-actor-id="${pc.id}">
             <div class="cgm-portrait-difficulty ${individualDiff > 0 ? 'cgm-difficulty-active' : ''}">${individualDiff > 0 ? individualDiff : ''}</div>
             ${isDisconnected ? '<div class="cgm-offline-badge"><i class="fas fa-wifi-slash"></i></div>' : ''}
             <div class="cgm-portrait-visual">
               ${this._buildEffectIconsHTML(pc, size)}
+              <div class="cgm-ah-strip${gmAssets > 0 || gmHinders > 0 ? ' cgm-ah-visible' : ''}" style="width:${size}px;">
+                <button type="button" class="cgm-ah-btn cgm-ah-asset${gmAssets > 0 ? ' cgm-ah-on' : ''}" data-ah="asset" title="GM Asset — eases this PC's rolls (max 2)${gaNote}. Left-click +1 · Right-click −1"><b>A</b><span class="cgm-ah-count">${gmAssets}</span></button>
+                <button type="button" class="cgm-ah-reset${flagA === 0 && flagH === 0 ? ' cgm-ah-idle' : ''}" data-ah-reset title="Reset GM asset & hindrance on this PC to 0 (party-wide modifiers are untouched)"><i class="fas fa-rotate-left"></i></button>
+                <button type="button" class="cgm-ah-btn cgm-ah-hinder${gmHinders > 0 ? ' cgm-ah-on' : ''}" data-ah="hinder" title="GM Hindrance — complicates this PC's rolls (max 6)${ghNote}. Left-click +1 · Right-click −1"><b>H</b><span class="cgm-ah-count">${gmHinders}</span></button>
+              </div>
               <div class="cgm-portrait-img-wrap ${shapeCls}" style="width:${size}px;height:${size}px;">
                 <img src="${pc.img}" alt="${pc.name}" class="cgm-portrait-img"
                      style="border-color: ${bColor}; border-width: ${borderWidth}px; object-fit: ${fit};">
@@ -3825,18 +3458,6 @@ class GMTaskbar {
       note.archived = true;
       await actor.setFlag("cypher-gm-taskbar", "actorNotes", notes);
       console.log(`${MODULE_ID} | Note archived for ${actor.name}:`, noteId);
-    }
-  }
-
-  async _unarchiveActorNote(actorId, noteId) {
-    const actor = game.actors.get(actorId);
-    if (!actor) return;
-    const notes = this._getActorNotes(actor, true);
-    const note = notes.find(n => n.id === noteId);
-    if (note) {
-      note.archived = false;
-      await actor.setFlag("cypher-gm-taskbar", "actorNotes", notes);
-      console.log(`${MODULE_ID} | Note unarchived for ${actor.name}:`, noteId);
     }
   }
 
@@ -4075,7 +3696,7 @@ ${paths}  </svg>
     requestAnimationFrame(() => menu.classList.add("cgm-radial-visible"));
 
     // Click handlers
-    const onSegClick = async (e) => {
+    const onSegClick = (e) => {
       e.stopPropagation();
       const action = e.currentTarget.dataset.action;
       const id = e.currentTarget.dataset.actorId;
@@ -4106,19 +3727,12 @@ ${paths}  </svg>
               ui.notifications.warn(`${a.name} has no player owner online.`);
               return;
             }
-            const description = await Dialog.prompt({
-              title: `GM Intrusion — ${a.name}`,
-              content: `<p>Describe the intrusion (optional):</p><textarea style="width:100%;height:64px;resize:vertical;"></textarea>`,
-              callback: (html) => html.find("textarea").val()
-            });
-            if (description == null) return; // cancelled
             for (const user of owners) {
               game.socket.emit("module.cypher-gm-taskbar", {
                 action: "requestIntrusion",
                 userId: user.id,
                 actorId: a.id,
-                actorUuid: a.uuid,
-                description
+                actorUuid: a.uuid
               });
             }
             ui.notifications.info(`Intrusion request sent to ${a.name}'s player.`);
@@ -4160,9 +3774,6 @@ ${paths}  </svg>
   }
 
   _hideRadialMenu() {
-    // Hard guarantee: closing the radial system erases every tether line,
-    // even if a menu element was already torn down by another path.
-    this._removeAllGMGroupRollLines();
     if (this._radialMenuEl) {
       this._radialMenuEl.remove();
       this._radialMenuEl = null;
@@ -4304,7 +3915,6 @@ ${paths}  </svg>
 
     // Vertical action buttons — lock icon reflects CURRENT state
     const vButtons = [
-      { action: "playerTasks", icon: "fa-clipboard-list", title: "Player Tasks", color: "#c8a96e" },
       { action: "toggleLockSheets", icon: lockSheets ? "fa-lock" : "fa-unlock", title: lockSheets ? "Unlock actor sheets for players" : "Lock actor sheets for players", color: "#e74c3c" },
       { action: "awardXp", icon: "fa-star", title: "Award XP", color: "#ffd700" },
       { action: "toggleCombat", icon: "fa-swords", title: "Toggle combat", color: "#3498db" },
@@ -4379,7 +3989,6 @@ ${paths}  </svg>
         e.stopPropagation();
         const action = btn.dataset.action;
         if (action === "toggleLockSheets") await this._toggleLockActorSheets();
-        else if (action === "playerTasks") this._openPlayerTasksPanel();
         else if (action === "awardXp") await this._awardXpFlow();
         else if (action === "toggleCombat") await this._toggleCombat();
         else if (action === "togglePause") game.togglePause();
@@ -4458,12 +4067,10 @@ ${paths}  </svg>
 
   _hideGMMenu() {
     if (this._gmMenuEl) {
-      const el = this._gmMenuEl;
-      this._gmMenuEl = null;
       this._cleanupGMMenuDrag?.();
       this._cleanupGMMenuDrag = null;
-      el.classList.remove("cgm-gm-winmenu-visible");
-      setTimeout(() => el.remove(), 200);
+      this._gmMenuEl.classList.remove("cgm-gm-winmenu-visible");
+      setTimeout(() => { this._gmMenuEl?.remove(); this._gmMenuEl = null; }, 200);
     }
   }
 
@@ -4665,19 +4272,12 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollMenu() {
-    // Line removal is unconditional: a close path that runs after the
-    // element was already torn down (double-hide, fade-timeout race) must
-    // still erase the tether, or it strands on screen until reload.
-    this._removeAllGMGroupRollLines();
-    const el = this._gmGroupRollMenuEl;
-    if (el) {
+    if (this._gmGroupRollMenuEl) {
       this._cleanupGMGroupRollDrag?.();
       this._cleanupGMGroupRollDrag = null;
-      el.classList.remove("cgm-radial-visible");
-      setTimeout(() => {
-        el.remove();
-        if (this._gmGroupRollMenuEl === el) this._gmGroupRollMenuEl = null;
-      }, 200);
+      this._removeAllGMGroupRollLines();
+      this._gmGroupRollMenuEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollMenuEl?.remove(); this._gmGroupRollMenuEl = null; }, 200);
     }
   }
 
@@ -6081,16 +5681,12 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollAttributes() {
-    this._removeGMGroupRollLine("cgm-gmroll-line-attributes");
-    const el = this._gmGroupRollAttributesEl;
-    if (el) {
+    if (this._gmGroupRollAttributesEl) {
       this._cleanupGMGroupRollAttributesDrag?.();
       this._cleanupGMGroupRollAttributesDrag = null;
-      el.classList.remove("cgm-radial-visible");
-      setTimeout(() => {
-        el.remove();
-        if (this._gmGroupRollAttributesEl === el) this._gmGroupRollAttributesEl = null;
-      }, 200);
+      this._removeGMGroupRollLine("cgm-gmroll-line-attributes");
+      this._gmGroupRollAttributesEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollAttributesEl?.remove(); this._gmGroupRollAttributesEl = null; }, 200);
     }
   }
 
@@ -6109,16 +5705,12 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollSkills() {
-    this._removeGMGroupRollLine("cgm-gmroll-line-skills");
-    const el = this._gmGroupRollSkillsEl;
-    if (el) {
+    if (this._gmGroupRollSkillsEl) {
       this._cleanupGMGroupRollSkillsDrag?.();
       this._cleanupGMGroupRollSkillsDrag = null;
-      el.classList.remove("cgm-radial-visible");
-      setTimeout(() => {
-        el.remove();
-        if (this._gmGroupRollSkillsEl === el) this._gmGroupRollSkillsEl = null;
-      }, 200);
+      this._removeGMGroupRollLine("cgm-gmroll-line-skills");
+      this._gmGroupRollSkillsEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollSkillsEl?.remove(); this._gmGroupRollSkillsEl = null; }, 200);
     }
   }
 
@@ -6135,16 +5727,12 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollFree() {
-    this._removeGMGroupRollLine("cgm-gmroll-line-free");
-    const el = this._gmGroupRollFreeEl;
-    if (el) {
+    if (this._gmGroupRollFreeEl) {
       this._cleanupGMGroupRollFreeDrag?.();
       this._cleanupGMGroupRollFreeDrag = null;
-      el.classList.remove("cgm-radial-visible");
-      setTimeout(() => {
-        el.remove();
-        if (this._gmGroupRollFreeEl === el) this._gmGroupRollFreeEl = null;
-      }, 200);
+      this._removeGMGroupRollLine("cgm-gmroll-line-free");
+      this._gmGroupRollFreeEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollFreeEl?.remove(); this._gmGroupRollFreeEl = null; }, 200);
     }
   }
 
@@ -6161,16 +5749,12 @@ ${paths}  </svg>
   }
 
   _hideGMGroupRollDefense() {
-    this._removeGMGroupRollLine("cgm-gmroll-line-defense");
-    const el = this._gmGroupRollDefenseEl;
-    if (el) {
+    if (this._gmGroupRollDefenseEl) {
       this._cleanupGMGroupRollDefenseDrag?.();
       this._cleanupGMGroupRollDefenseDrag = null;
-      el.classList.remove("cgm-radial-visible");
-      setTimeout(() => {
-        el.remove();
-        if (this._gmGroupRollDefenseEl === el) this._gmGroupRollDefenseEl = null;
-      }, 200);
+      this._removeGMGroupRollLine("cgm-gmroll-line-defense");
+      this._gmGroupRollDefenseEl.classList.remove("cgm-radial-visible");
+      setTimeout(() => { this._gmGroupRollDefenseEl?.remove(); this._gmGroupRollDefenseEl = null; }, 200);
     }
   }
 
@@ -8439,35 +8023,17 @@ ${paths}  </svg>
     });
 
     // ── Build notes content ──
-    const activeNotes = notes.filter(n => !n.archived);
-    const archivedNotes = notes.filter(n => n.archived);
-
-    const activeList = activeNotes.length
-      ? activeNotes.map((n) => `
-        <div class="cgm-note-item" data-note-id="${n.id}">
+    const notesList = notes.length
+      ? notes.map((n) => `
+        <div class="cgm-note-item ${n.archived ? 'cgm-note-archived' : ''}">
           <div class="cgm-note-meta">
-            <span>${n.date} ${n.time}</span>
+            <span>${n.date} ${n.time} ${n.archived ? '<span class="cgm-note-archive-badge">Archived</span>' : ''}</span>
             <button class="cgm-note-delete" data-note-id="${n.id}" title="Delete"><i class="fas fa-times"></i></button>
           </div>
           <div class="cgm-note-text">${this._escapeHTML(n.text)}</div>
         </div>
       `).join("")
       : `<div class="cgm-note-empty">No notes yet. Add one below!</div>`;
-
-    const archiveList = archivedNotes.length
-      ? archivedNotes.map((n) => `
-        <div class="cgm-note-item cgm-note-archived" data-note-id="${n.id}">
-          <div class="cgm-note-meta">
-            <span>${n.date} ${n.time} <span class="cgm-note-archive-badge">Archived</span></span>
-            <div class="cgm-note-archive-actions">
-              <button class="cgm-note-unarchive" data-note-id="${n.id}" title="Restore to Notes"><i class="fas fa-rotate-left"></i></button>
-              <button class="cgm-note-delete" data-note-id="${n.id}" title="Delete permanently"><i class="fas fa-times"></i></button>
-            </div>
-          </div>
-          <div class="cgm-note-text">${this._escapeHTML(n.text)}</div>
-        </div>
-      `).join("")
-      : `<div class="cgm-note-empty">No archived notes.</div>`;
 
     // ── Create panel ──
     const panel = document.createElement("div");
@@ -8480,16 +8046,7 @@ ${paths}  </svg>
         <span>${name}</span>
         <button class="cgm-notes-panel-close"><i class="fas fa-xmark"></i></button>
       </div>
-      <div class="cgm-notes-tabs">
-        <button class="cgm-notes-tab cgm-notes-tab-active" data-tab="active">
-          <i class="fas fa-note-sticky"></i> Notes <span class="cgm-notes-tab-count">${activeNotes.length}</span>
-        </button>
-        <button class="cgm-notes-tab" data-tab="archive">
-          <i class="fas fa-box-archive"></i> Archive <span class="cgm-notes-tab-count">${archivedNotes.length}</span>
-        </button>
-      </div>
-      <div class="cgm-notes-panel-list cgm-notes-list-active">${activeList}</div>
-      <div class="cgm-notes-panel-list cgm-notes-list-archive" style="display:none;">${archiveList}</div>
+      <div class="cgm-notes-panel-list">${notesList}</div>
       <div class="cgm-notes-panel-add">
         <textarea class="cgm-notes-input" placeholder="Write a note..."></textarea>
         <button class="cgm-notes-panel-add-btn">
@@ -8555,37 +8112,10 @@ ${paths}  </svg>
     });
 
     // ── Handlers ──
-    let currentTab = "active";
     const refreshPanel = async () => {
       this._hideNotesPanel();
       await this._showNotesDialog(actorId, wrapEl);
-      // Restore the tab the user was on
-      if (currentTab === "archive") {
-        const newPanel = this._notesPanelEl;
-        if (newPanel) {
-          newPanel.querySelector('.cgm-notes-tab[data-tab="active"]')?.classList.remove("cgm-notes-tab-active");
-          newPanel.querySelector('.cgm-notes-tab[data-tab="archive"]')?.classList.add("cgm-notes-tab-active");
-          newPanel.querySelector(".cgm-notes-list-active")?.setAttribute("style", "display:none;");
-          newPanel.querySelector(".cgm-notes-list-archive")?.setAttribute("style", "");
-          newPanel.querySelector(".cgm-notes-panel-add")?.setAttribute("style", "display:none;");
-        }
-      }
     };
-
-    // Tab switching
-    panel.querySelectorAll(".cgm-notes-tab").forEach(tabBtn => {
-      tabBtn.addEventListener("click", () => {
-        const tab = tabBtn.dataset.tab;
-        if (tab === currentTab) return;
-        currentTab = tab;
-        panel.querySelectorAll(".cgm-notes-tab").forEach(t => t.classList.remove("cgm-notes-tab-active"));
-        tabBtn.classList.add("cgm-notes-tab-active");
-        const isActive = tab === "active";
-        panel.querySelector(".cgm-notes-list-active")?.setAttribute("style", isActive ? "" : "display:none;");
-        panel.querySelector(".cgm-notes-list-archive")?.setAttribute("style", isActive ? "display:none;" : "");
-        panel.querySelector(".cgm-notes-panel-add")?.setAttribute("style", isActive ? "" : "display:none;");
-      });
-    });
 
     panel.querySelector(".cgm-notes-panel-close")?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -8604,14 +8134,6 @@ ${paths}  </svg>
       btn.addEventListener("click", async () => {
         const noteId = btn.dataset.noteId;
         await this._deleteActorNote(actorId, noteId);
-        await refreshPanel();
-      });
-    });
-
-    panel.querySelectorAll(".cgm-note-unarchive").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        const noteId = btn.dataset.noteId;
-        await this._unarchiveActorNote(actorId, noteId);
         await refreshPanel();
       });
     });
@@ -10027,7 +9549,7 @@ ${paths}  </svg>
         ${notes.map((n, i) => `
           <div class="cgm-tooltip-note" data-index="${i}">
             <label class="cgm-tooltip-check">
-              <input type="checkbox" data-note-id="${n.id}" data-actor-id="${actorId}">
+              <input type="checkbox" data-index="${i}" data-actor-id="${actorId}">
               <span class="cgm-check-mark"></span>
             </label>
             <div class="cgm-tooltip-content">
@@ -10059,10 +9581,10 @@ ${paths}  </svg>
     tooltip.querySelectorAll('.cgm-tooltip-check input[type="checkbox"]').forEach(chk => {
       chk.addEventListener("change", async (e) => {
         e.stopPropagation();
-        const noteId = chk.dataset.noteId;
+        const idx = parseInt(chk.dataset.index);
         const aid = chk.dataset.actorId;
-        await this._archiveActorNote(aid, noteId);
-        const noteRow = chk.closest(".cgm-tooltip-note");
+        await this._archiveActorNote(aid, idx);
+        const noteRow = tooltip.querySelector(`.cgm-tooltip-note[data-index="${idx}"]`);
         if (noteRow) {
           noteRow.style.transition = "opacity 0.2s, transform 0.2s";
           noteRow.style.opacity = "0";
@@ -10228,6 +9750,28 @@ ${paths}  </svg>
         if (actor) actor.sheet.render(true);
       });
 
+      // GM asset/hinder buttons (top of portrait)
+      wrap.querySelectorAll(".cgm-ah-btn").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          await this._adjustGMModifier(actorId, btn.dataset.ah, +1);
+        });
+        btn.addEventListener("contextmenu", async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          await this._adjustGMModifier(actorId, btn.dataset.ah, -1);
+        });
+      });
+
+      // GM asset/hinder reset (middle pill)
+      const ahReset = wrap.querySelector("[data-ah-reset]");
+      if (ahReset) {
+        ahReset.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          await this._resetGMModifiers(actorId);
+        });
+      }
+
       // Hover: show notes tooltip (with delay)
       wrap.addEventListener("mouseenter", () => {
         // Re-entry cancels a pending hide so the tooltip doesn't flash closed
@@ -10250,6 +9794,69 @@ ${paths}  </svg>
         }, 150);
       });
     });
+  }
+
+  /* Adjust a GM-assigned asset/hinder modifier on a PC. Assets ease the PC's
+     rolls (cap 2, matching the Cypher rules), hinders complicate them (cap 6).
+     Stored on the actor as cypher-gm-taskbar flags — the player's Cypher
+     Taskbar reads them when opening any roll dialog, and this module patches
+     already-open dialogs via _updateOpenRollDialogs(). */
+  async _adjustGMModifier(actorId, kind, delta) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const key = kind === "asset" ? "gmAssets" : "gmHinders";
+    const cap = kind === "asset" ? 2 : 6;
+    const cur = Math.max(0, Math.min(cap, Number(actor.getFlag("cypher-gm-taskbar", key) ?? 0) || 0));
+    const next = Math.max(0, Math.min(cap, cur + delta));
+    if (next === cur) return;
+    await actor.setFlag("cypher-gm-taskbar", key, next);
+    // Update the buttons for this actor in place (no full re-render).
+    // The count shown is the EFFECTIVE value (portrait flag + party-wide layer).
+    const effAfter = this._effectiveAH(actor);
+    const effNext = kind === "asset" ? effAfter.assets : effAfter.hinders;
+    this.element?.querySelectorAll(`.cgm-ah-btn[data-ah="${kind}"]`).forEach(b => {
+      const w = b.closest("[data-actor-id]");
+      if (w?.dataset.actorId !== actorId) return;
+      const c = b.querySelector(".cgm-ah-count");
+      if (c) c.textContent = String(effNext);
+      b.classList.toggle("cgm-ah-on", effNext > 0);
+    });
+    // Wake the reset pill if either modifier is now active
+    if (next > 0) {
+      const resetBtn = this.element?.querySelector(`[data-actor-id="${actorId}"] [data-ah-reset]`);
+      resetBtn?.classList.remove("cgm-ah-idle");
+    }
+    // Sync any open roll dialogs on players' screens (and ours)
+    this._updateOpenRollDialogs?.();
+  }
+
+  /* Reset both GM-assigned modifiers (asset + hinder) on a PC back to 0 in
+     one click. No-op when nothing is set. Updates the pills in place and
+     re-syncs open roll dialogs, mirroring _adjustGMModifier. */
+  async _resetGMModifiers(actorId) {
+    const actor = game.actors.get(actorId);
+    if (!actor) return;
+    const curA = Math.max(0, Math.min(2, Number(actor.getFlag("cypher-gm-taskbar", "gmAssets") ?? 0) || 0));
+    const curH = Math.max(0, Math.min(6, Number(actor.getFlag("cypher-gm-taskbar", "gmHinders") ?? 0) || 0));
+    if (curA === 0 && curH === 0) return;
+    await actor.setFlag("cypher-gm-taskbar", "gmAssets", 0);
+    await actor.setFlag("cypher-gm-taskbar", "gmHinders", 0);
+    // Update both pills for this actor in place (no full re-render). Counts
+    // show the EFFECTIVE value — the party-wide layer still applies.
+    const effReset = this._effectiveAH(actor);
+    this.element?.querySelectorAll(`.cgm-ah-btn[data-ah]`).forEach(b => {
+      const w = b.closest("[data-actor-id]");
+      if (w?.dataset.actorId !== actorId) return;
+      const c = b.querySelector(".cgm-ah-count");
+      const v = b.dataset.ah === "asset" ? effReset.assets : effReset.hinders;
+      if (c) c.textContent = String(v);
+      b.classList.toggle("cgm-ah-on", v > 0);
+    });
+    // Dim the reset pill until a modifier is set again
+    const resetBtn = this.element?.querySelector(`[data-actor-id="${actorId}"] [data-ah-reset]`);
+    resetBtn?.classList.add("cgm-ah-idle");
+    // Sync any open roll dialogs on players' screens (and ours)
+    this._updateOpenRollDialogs?.();
   }
 
   /* Refresh portrait data (pools, XP, damage track, difficulty) without full re-render */
@@ -10283,6 +9890,29 @@ ${paths}  </svg>
       if (diffBadge) {
         diffBadge.classList.toggle('cgm-difficulty-active', individualDiff > 0);
         diffBadge.textContent = individualDiff > 0 ? individualDiff : '';
+      }
+
+      // GM asset/hinder counts (effective = portrait flag + party-wide layer)
+      const effAH = this._effectiveAH(actor);
+      // v4.5.167 — autohide: keep the strip revealed while this PC has a
+      // live asset/hindrance (hover alone also reveals it — pure CSS)
+      wrap.querySelector('.cgm-ah-strip')?.classList.toggle('cgm-ah-visible', effAH.assets > 0 || effAH.hinders > 0);
+      const ahAsset = wrap.querySelector('.cgm-ah-btn[data-ah="asset"]');
+      if (ahAsset) {
+        ahAsset.querySelector('.cgm-ah-count')?.replaceChildren(document.createTextNode(String(effAH.assets)));
+        ahAsset.classList.toggle('cgm-ah-on', effAH.assets > 0);
+      }
+      const ahHinder = wrap.querySelector('.cgm-ah-btn[data-ah="hinder"]');
+      if (ahHinder) {
+        ahHinder.querySelector('.cgm-ah-count')?.replaceChildren(document.createTextNode(String(effAH.hinders)));
+        ahHinder.classList.toggle('cgm-ah-on', effAH.hinders > 0);
+      }
+      // Reset pill dims when the portrait's own flags have nothing to clear
+      const ahResetBtn = wrap.querySelector('[data-ah-reset]');
+      if (ahResetBtn) {
+        const flagA2 = Math.max(0, Math.min(2, Number(actor?.getFlag("cypher-gm-taskbar", "gmAssets") ?? 0) || 0));
+        const flagH2 = Math.max(0, Math.min(6, Number(actor?.getFlag("cypher-gm-taskbar", "gmHinders") ?? 0) || 0));
+        ahResetBtn.classList.toggle('cgm-ah-idle', flagA2 === 0 && flagH2 === 0);
       }
 
       // Update pool bars
@@ -10414,11 +10044,23 @@ ${paths}  </svg>
       difficulty = parseInt(difficulty, 10);
       if (isNaN(difficulty) || difficulty < 0 || difficulty > 15) continue;
 
-      // Only update if the applied difficulty would change
-      if (dialog._cgmAppliedActor === actor.id && dialog._cgmAppliedDifficulty === difficulty) continue;
+      // GM-assigned asset/hinder modifiers, INCLUDING the party-wide global
+      // layer (read before the change-check so an A/H-only change is not
+      // skipped when difficulty is unchanged)
+      const effSync = this._effectiveAH(actor);
+      const gmA = effSync.assets;
+      const gmH = effSync.hinders;
+
+      // Only update if none of the applied values would change
+      if (dialog._cgmAppliedActor === actor.id
+        && dialog._cgmAppliedDifficulty === difficulty
+        && dialog._cgmAppliedAssets === gmA
+        && dialog._cgmAppliedHinders === gmH) continue;
 
       dialog._cgmAppliedActor = actor.id;
       dialog._cgmAppliedDifficulty = difficulty;
+      dialog._cgmAppliedAssets = gmA;
+      dialog._cgmAppliedHinders = gmH;
 
       // Apply directly to the DOM select element
       const el = dialog.element?.[0] || dialog.element;
@@ -10428,6 +10070,14 @@ ${paths}  </svg>
         if (select.value !== strVal) {
           select.value = strVal;
           select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }
+      // Sync the asset/hinder selects live too
+      for (const [selName, selVal] of [["assets", gmA], ["hinderedBy", gmH]]) {
+        const sel = el?.querySelector?.(`select[name="${selName}"]`);
+        if (sel && sel.value !== String(selVal)) {
+          sel.value = String(selVal);
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
         }
       }
     }
@@ -11222,6 +10872,23 @@ ${paths}  </svg>
       });
     }
 
+    // Party-wide asset/hindrance controls (strip above the difficulty box)
+    this.element.querySelectorAll('[data-gah]').forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await this._adjustGlobalAH(btn.dataset.gah, +1);
+      });
+      btn.addEventListener("contextmenu", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await this._adjustGlobalAH(btn.dataset.gah, -1);
+      });
+    });
+    this.element.querySelector('[data-gah-reset]')?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await this._resetGlobalAH();
+    });
+
     // Lock toggle
     this.element.querySelector('[data-action="toggleLock"]')?.addEventListener("click", async () => {
       this._locked = !this._locked;
@@ -11285,14 +10952,6 @@ ${paths}  </svg>
       window.cypherItemsCanvas.toggle();
     });
 
-    // Gallery Canvas button
-    this.element.querySelector('[data-action="openGalleryCanvas"]')?.addEventListener("click", () => {
-      if (!window.cypherGalleryCanvas) {
-        window.cypherGalleryCanvas = new GalleryCanvas();
-      }
-      window.cypherGalleryCanvas.toggle();
-    });
-
     // Cypher Connections button
     this.element.querySelector('[data-action="openConnections"]')?.addEventListener("click", async () => {
       if (!window.CypherConnections) {
@@ -11354,18 +11013,6 @@ ${paths}  </svg>
     this.element.querySelector('[data-action="openRandomPanel"]')?.addEventListener("click", (e) => {
       this._toggleRandomPanel(e.currentTarget);
     });
-  }
-
-  /** Player answered an intrusion (taskbar banner or fallback dialog). */
-  _logIntrusionOutcome({ actorName, accepted, gaveToName } = {}) {
-    const time = new Date().toLocaleTimeString();
-    const description = accepted
-      ? `Accepted (+2 XP${gaveToName ? `, gave 1 to ${gaveToName}` : ""})`
-      : "Refused (−1 XP)";
-    this._intrusions.unshift({ time, target: actorName || "Unknown", description });
-    if (this._intrusions.length > 50) this._intrusions.pop();
-    ui.notifications.info(`Intrusion ${accepted ? "accepted" : "refused"} — ${actorName || "Unknown"}.`);
-    if (this.element?.querySelector(".cgm-intrusion-actions")) this._openPanel("intrusions");
   }
 
   _bindPanelEvents(key) {
@@ -11723,7 +11370,6 @@ ${paths}  </svg>
             wrap.style.width = `${val}px`;
             wrap.style.height = `${val}px`;
           });
-          this._syncPortraitBgWidth();
           const vd = el.querySelector('[data-action="setPortraitSize"] + .cgm-slider-val');
           if (vd) vd.textContent = `${val}px`;
         });
@@ -12281,13 +11927,6 @@ ${paths}  </svg>
               });
               ownedActors.forEach(actorId => {
                 this._disconnectedActors.add(actorId);
-                this._disconnectionTimes.set(actorId, Date.now());
-                const fadeT = setTimeout(() => {
-                  this._fadeTimeouts.delete(actorId);
-                  // Still away after two minutes — switch flash to faded
-                  if (this._disconnectedActors.has(actorId)) this.render();
-                }, 120000);
-                this._fadeTimeouts.set(actorId, fadeT);
                 this._startDisconnectionSound(actorId);
               });
               if (ownedActors.length) this.render();
@@ -12310,9 +11949,6 @@ ${paths}  </svg>
             });
             ownedActors.forEach(actorId => {
               this._disconnectedActors.delete(actorId);
-              this._disconnectionTimes.delete(actorId);
-              const fadeT = this._fadeTimeouts.get(actorId);
-              if (fadeT) { clearTimeout(fadeT); this._fadeTimeouts.delete(actorId); }
               this._stopDisconnectionSound(actorId);
             });
             if (ownedActors.length) this.render();
@@ -14109,491 +13745,6 @@ ${paths}  </svg>
     });
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  //  PLAYER TASKS — GM delegation, approval workflow, archive
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /** Priority config */
-  _ptPriorities() {
-    return {
-      yesterday: { label: "YESTERDAY", color: "#ff4444", icon: "fa-fire" },
-      soon:      { label: "SOON ENOUGH", color: "#ffaa00", icon: "fa-clock" },
-      wait:      { label: "CAN WAIT", color: "#44cc44", icon: "fa-coffee" }
-    };
-  }
-
-  /** Get all player-owned PC actors */
-  _ptPlayerActors() {
-    return game.actors.filter(a => a.type === "pc" && a.hasPlayerOwner);
-  }
-
-  /** Collect all GM-delegated tasks across all player actors */
-  _collectDelegatedTasks() {
-    const actors = this._ptPlayerActors();
-    const seen = new Map(); // taskId → task + actors
-    for (const actor of actors) {
-      const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
-      for (const t of tasks) {
-        if (t.createdBy !== "gm") continue;
-        if (!seen.has(t.id)) {
-          seen.set(t.id, { ...t, _actorIds: [actor.id], _actorNames: [actor.name] });
-        } else {
-          const existing = seen.get(t.id);
-          existing._actorIds.push(actor.id);
-          existing._actorNames.push(actor.name);
-        }
-      }
-    }
-    return [...seen.values()];
-  }
-
-  /** Toggle the Player Tasks panel */
-  _openPlayerTasksPanel() {
-    document.querySelector("#cgm-pt-wrapper")?.remove();
-
-    const wrapper = document.createElement("div");
-    wrapper.id = "cgm-pt-wrapper";
-    wrapper.style.cssText = "position:fixed;z-index:10002;left:20px;top:50%;transform:translateY(-50%);";
-
-    const panel = document.createElement("div");
-    panel.id = "cgm-pt-panel";
-    panel.className = "cgm-pt-panel";
-    panel.style.cssText = "position:relative;width:600px;max-height:680px;display:flex;flex-direction:column;overflow:hidden;";
-
-    panel.innerHTML = `
-      <div class="cgm-pt-header">
-        <span class="cgm-pt-title"><i class="fas fa-clipboard-list"></i> PLAYER TASKS</span>
-        <div class="cgm-pt-header-actions">
-          <button class="cgm-pt-action" id="cgm-pt-add" title="Create Task"><i class="fas fa-plus"></i></button>
-          <button class="cgm-pt-action" id="cgm-pt-close" title="Close"><i class="fas fa-times"></i></button>
-        </div>
-      </div>
-      <div class="cgm-pt-tabs">
-        <button class="cgm-pt-tab is-active" data-tab="active"><i class="fas fa-list"></i> ACTIVE</button>
-        <button class="cgm-pt-tab" data-tab="archive"><i class="fas fa-box-archive"></i> ARCHIVE</button>
-      </div>
-      <div class="cgm-pt-body" id="cgm-pt-list"></div>`;
-
-    wrapper.appendChild(panel);
-    document.body.appendChild(wrapper);
-
-    // Draggable header
-    const header = panel.querySelector(".cgm-pt-header");
-    let isDragging = false, dragX = 0, dragY = 0;
-    header.style.cursor = "grab";
-    header.addEventListener("mousedown", (e) => {
-      if (e.target.closest("button")) return;
-      isDragging = true;
-      const r = wrapper.getBoundingClientRect();
-      dragX = e.clientX - r.left;
-      dragY = e.clientY - r.top;
-      wrapper.style.transform = "none";
-      header.style.cursor = "grabbing";
-    });
-    const onMove = (e) => {
-      if (!isDragging) return;
-      wrapper.style.left = `${e.clientX - dragX}px`;
-      wrapper.style.top = `${e.clientY - dragY}px`;
-    };
-    const onUp = () => { isDragging = false; header.style.cursor = "grab"; };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-
-    requestAnimationFrame(() => panel.classList.add("is-open"));
-
-    const _close = () => {
-      panel.classList.remove("is-open");
-      panel.classList.add("is-closing");
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      panel.addEventListener("transitionend", () => wrapper.remove(), { once: true });
-    };
-
-    panel.querySelector("#cgm-pt-close")?.addEventListener("click", (e) => { e.stopPropagation(); _close(); });
-    panel.querySelector("#cgm-pt-add")?.addEventListener("click", (e) => { e.stopPropagation(); this._openGMTaskDelegator(); });
-
-    // Tab switching
-    panel.querySelectorAll(".cgm-pt-tab").forEach(tab => {
-      tab.addEventListener("click", () => {
-        panel.querySelectorAll(".cgm-pt-tab").forEach(t => t.classList.remove("is-active"));
-        tab.classList.add("is-active");
-        this._renderPTList(panel.querySelector("#cgm-pt-list"), tab.dataset.tab);
-      });
-    });
-
-    // Initial render
-    this._renderPTList(panel.querySelector("#cgm-pt-list"), "active");
-  }
-
-  /** Render the Player Tasks list into a container */
-  _renderPTList(container, tab = "active") {
-    if (!container) return;
-    const all = this._collectDelegatedTasks();
-    const priorities = this._ptPriorities();
-    const esc = foundry.utils.escapeHTML;
-
-    const filtered = all.filter(t => tab === "archive" ? !!t.solved : !t.solved);
-
-    if (filtered.length === 0) {
-      container.innerHTML = `<div class="cgm-pt-empty"><i class="fas fa-${tab === 'archive' ? 'box-archive' : 'clipboard-list'}"></i><p>No ${tab} tasks.</p></div>`;
-      return;
-    }
-
-    // Sort by priority then newest
-    const prioOrder = { yesterday: 0, soon: 1, wait: 2 };
-    filtered.sort((a, b) => {
-      if (!!a.approvalPending !== !!b.approvalPending) return a.approvalPending ? -1 : 1;
-      const pa = prioOrder[a.priority] ?? 1;
-      const pb = prioOrder[b.priority] ?? 1;
-      if (pa !== pb) return pa - pb;
-      return (b.createdAt || 0) - (a.createdAt || 0);
-    });
-
-    container.innerHTML = filtered.map(task => {
-      const p = priorities[task.priority] || priorities.soon;
-      const isApproval = !!task.approvalPending && !task.solved;
-      const rowClasses = ["cgm-pt-item", isApproval ? "cgm-pt-approval" : ""].filter(Boolean).join(" ");
-      const players = task._actorNames?.join(", ") || "?";
-      return `
-        <div class="${rowClasses}" data-task-id="${task.id}">
-          <div class="cgm-pt-item-priority" style="--ct-prio:${p.color}" title="${p.label}"><i class="fas ${p.icon}"></i></div>
-          <div class="cgm-pt-item-content">
-            <div class="cgm-pt-item-title">${esc(task.name || "Untitled")}
-              ${isApproval ? '<span class="cgm-pt-approval-badge"><i class="fas fa-hourglass-half"></i> AWAITING APPROVAL</span>' : ''}
-            </div>
-            <div class="cgm-pt-item-players"><i class="fas fa-users"></i> ${esc(players)}</div>
-            <div class="cgm-pt-item-meta">
-              <span style="color:${p.color}"><i class="fas ${p.icon}"></i> ${p.label}</span>
-              <span>${task.createdAt ? new Date(task.createdAt).toLocaleDateString() : ""}</span>
-            </div>
-          </div>
-          <div class="cgm-pt-item-actions">
-            ${isApproval ? `
-              <button class="cgm-pt-act cgm-pt-approve" data-approve="${task.id}" title="Approve — mark as solved"><i class="fas fa-check"></i></button>
-              <button class="cgm-pt-act cgm-pt-reject" data-reject="${task.id}" title="Reject — back to active"><i class="fas fa-xmark"></i></button>
-            ` : ''}
-            ${tab === 'archive' ? `
-              <button class="cgm-pt-act cgm-pt-restore" data-restore="${task.id}" title="Restore to active"><i class="fas fa-rotate-left"></i></button>
-            ` : ''}
-            <button class="cgm-pt-act cgm-pt-edit" data-edit="${task.id}" title="Edit"><i class="fas fa-pen"></i></button>
-            <button class="cgm-pt-act cgm-pt-delete" data-delete="${task.id}" title="Delete"><i class="fas fa-trash"></i></button>
-          </div>
-        </div>`;
-    }).join("");
-
-    // Bind actions
-    container.querySelectorAll("[data-approve]").forEach(btn => {
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        await this._ptUpdateTask(btn.dataset.approve, t => ({ ...t, solved: true, approvalPending: false }));
-        this._renderPTList(container, tab);
-        ui.notifications.info("Task approved and archived.");
-      });
-    });
-
-    container.querySelectorAll("[data-reject]").forEach(btn => {
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        await this._ptUpdateTask(btn.dataset.reject, t => ({ ...t, approvalPending: false }));
-        this._renderPTList(container, tab);
-        ui.notifications.info("Approval rejected — task back to active.");
-      });
-    });
-
-    container.querySelectorAll("[data-restore]").forEach(btn => {
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        await this._ptUpdateTask(btn.dataset.restore, t => ({ ...t, solved: false, approvalPending: false }));
-        this._renderPTList(container, tab);
-        ui.notifications.info("Task restored to active.");
-      });
-    });
-
-    container.querySelectorAll("[data-edit]").forEach(btn => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this._openGMTaskDelegator(btn.dataset.edit);
-      });
-    });
-
-    container.querySelectorAll("[data-delete]").forEach(btn => {
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        const taskId = btn.dataset.delete;
-        const all2 = this._collectDelegatedTasks();
-        const task = all2.find(t => t.id === taskId);
-        if (!task) return;
-        const confirmed = await Dialog.confirm({
-          title: "Delete Task",
-          content: `<p>Delete "<strong>${esc(task.name)}</strong>" from all players?</p>`,
-        });
-        if (!confirmed) return;
-        await this._ptDeleteTask(taskId);
-        this._renderPTList(container, tab);
-        ui.notifications.info(`"${task.name}" deleted.`);
-      });
-    });
-  }
-
-  /** Update a delegated task across all actors that have it */
-  async _ptUpdateTask(taskId, updater) {
-    const actors = this._ptPlayerActors();
-    for (const actor of actors) {
-      const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
-      const idx = tasks.findIndex(t => t.id === taskId);
-      if (idx === -1) continue;
-      tasks[idx] = updater(tasks[idx]);
-      await actor.setFlag("cypher-taskbar", "myTasks", tasks);
-    }
-  }
-
-  /** Delete a delegated task from all actors */
-  async _ptDeleteTask(taskId) {
-    const actors = this._ptPlayerActors();
-    for (const actor of actors) {
-      const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
-      const filtered = tasks.filter(t => t.id !== taskId);
-      if (filtered.length !== tasks.length) {
-        await actor.setFlag("cypher-taskbar", "myTasks", filtered);
-      }
-    }
-  }
-
-  /** Open the GM Task Delegator (create/edit delegated tasks) */
-  _openGMTaskDelegator(editTaskId = null) {
-    document.querySelector("#cgm-pt-form-wrapper")?.remove();
-
-    const priorities = this._ptPriorities();
-    const esc = foundry.utils.escapeHTML;
-    const players = this._ptPlayerActors();
-
-    // For edit: find the existing task
-    let existingTask = null;
-    if (editTaskId) {
-      const all = this._collectDelegatedTasks();
-      existingTask = all.find(t => t.id === editTaskId) || null;
-    }
-
-    const wrapper = document.createElement("div");
-    wrapper.id = "cgm-pt-form-wrapper";
-
-    // Position next to panel
-    const ptPanel = document.querySelector("#cgm-pt-panel");
-    let formLeft = "50%", formTop = "50%", formTransform = "translate(-50%,-50%)";
-    if (ptPanel) {
-      const rect = ptPanel.getBoundingClientRect();
-      const vw = window.innerWidth, vh = window.innerHeight;
-      const fw = 560, fh = 640;
-      if (rect.right + fw + 20 < vw) {
-        formLeft = `${rect.right + 16}px`;
-        formTop = `${Math.max(10, Math.min(rect.top, vh - fh - 10))}px`;
-        formTransform = "none";
-      } else if (rect.left - fw - 20 > 0) {
-        formLeft = `${rect.left - fw - 16}px`;
-        formTop = `${Math.max(10, Math.min(rect.top, vh - fh - 10))}px`;
-        formTransform = "none";
-      }
-    }
-    wrapper.style.cssText = `position:fixed;z-index:10005;left:${formLeft};top:${formTop};transform:${formTransform};`;
-
-    const form = document.createElement("div");
-    form.id = "cgm-pt-form";
-    form.className = "cgm-pt-form";
-    form.style.cssText = "position:relative;width:560px;display:flex;flex-direction:column;overflow:hidden;";
-
-    const selectedActors = existingTask?._actorIds || [];
-
-    form.innerHTML = `
-      <div class="cgm-pt-header" style="cursor:grab">
-        <span class="cgm-pt-title"><i class="fas fa-${existingTask ? 'pen' : 'plus'}"></i> ${existingTask ? 'EDIT' : 'CREATE'} TASK</span>
-        <button class="cgm-pt-action" id="cgm-pt-form-close" title="Close"><i class="fas fa-times"></i></button>
-      </div>
-      <div class="cgm-pt-form-body">
-        <label class="cgm-pt-label">
-          <span>Task Name</span>
-          <input type="text" id="cgm-pt-name" value="${esc(existingTask?.name || "")}" placeholder="What needs doing?" maxlength="100">
-        </label>
-        <label class="cgm-pt-label">
-          <span>Priority</span>
-          <div class="cgm-pt-prio-options">
-            ${Object.entries(priorities).map(([key, p]) => `
-              <button type="button" class="cgm-pt-prio-btn ${(existingTask?.priority || 'soon') === key ? 'is-selected' : ''}" data-prio="${key}" style="--ct-prio:${p.color}">
-                <i class="fas ${p.icon}"></i> ${p.label}
-              </button>
-            `).join("")}
-          </div>
-        </label>
-        <label class="cgm-pt-label">
-          <span>Delegate To</span>
-          <div class="cgm-pt-delegate">
-            <label class="cgm-pt-delegate-all">
-              <input type="checkbox" id="cgm-pt-all" ${players.length > 0 && selectedActors.length === players.length ? 'checked' : ''}>
-              <span><i class="fas fa-users"></i> ALL PLAYERS</span>
-            </label>
-            <div class="cgm-pt-player-list">
-              ${players.map(a => `
-                <label class="cgm-pt-player-check">
-                  <input type="checkbox" data-actor-id="${a.id}" ${selectedActors.includes(a.id) ? 'checked' : ''}>
-                  <img src="${a.img || 'icons/svg/mystery-man.svg'}" alt="" draggable="false">
-                  <span>${esc(a.name)}</span>
-                </label>
-              `).join("")}
-            </div>
-          </div>
-        </label>
-        <label class="cgm-pt-label">
-          <span>Details</span>
-          <div class="cgm-pt-wysiwyg-toolbar">
-            <button type="button" data-cmd="bold" title="Bold"><i class="fas fa-bold"></i></button>
-            <button type="button" data-cmd="italic" title="Italic"><i class="fas fa-italic"></i></button>
-            <button type="button" data-cmd="underline" title="Underline"><i class="fas fa-underline"></i></button>
-            <span class="cgm-pt-sep"></span>
-            <button type="button" data-cmd="insertUnorderedList" title="Bullets"><i class="fas fa-list-ul"></i></button>
-            <button type="button" data-cmd="insertOrderedList" title="Numbered"><i class="fas fa-list-ol"></i></button>
-            <span class="cgm-pt-sep"></span>
-            <button type="button" data-cmd="h3" title="Heading"><i class="fas fa-heading"></i></button>
-            <button type="button" data-cmd="removeFormat" title="Clear"><i class="fas fa-eraser"></i></button>
-          </div>
-          <div class="cgm-pt-wysiwyg-editor" id="cgm-pt-desc" contenteditable="true" data-placeholder="Describe the task...">${existingTask?.description || ""}</div>
-        </label>
-      </div>
-      <div class="cgm-pt-form-footer">
-        <button class="cgm-pt-save" id="cgm-pt-save"><i class="fas fa-save"></i> Save</button>
-      </div>`;
-
-    wrapper.appendChild(form);
-    document.body.appendChild(wrapper);
-
-    requestAnimationFrame(() => form.classList.add("is-open"));
-
-    // Draggable
-    let isDragging = false, dragX = 0, dragY = 0;
-    const hdr = form.querySelector(".cgm-pt-header");
-    hdr.addEventListener("mousedown", (e) => {
-      if (e.target.closest("button")) return;
-      isDragging = true;
-      const r = wrapper.getBoundingClientRect();
-      dragX = e.clientX - r.left;
-      dragY = e.clientY - r.top;
-      wrapper.style.transform = "none";
-    });
-    const onMove = (e) => {
-      if (!isDragging) return;
-      wrapper.style.left = `${e.clientX - dragX}px`;
-      wrapper.style.top = `${e.clientY - dragY}px`;
-    };
-    const onUp = () => { isDragging = false; };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-
-    // Priority
-    let selectedPrio = existingTask?.priority || "soon";
-    form.querySelectorAll("[data-prio]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        form.querySelectorAll("[data-prio]").forEach(b => b.classList.remove("is-selected"));
-        btn.classList.add("is-selected");
-        selectedPrio = btn.dataset.prio;
-      });
-    });
-
-    // ALL PLAYERS toggle
-    const allChk = form.querySelector("#cgm-pt-all");
-    allChk?.addEventListener("change", () => {
-      form.querySelectorAll("[data-actor-id]").forEach(cb => { cb.checked = allChk.checked; });
-    });
-    form.querySelectorAll("[data-actor-id]").forEach(cb => {
-      cb.addEventListener("change", () => {
-        const all = [...form.querySelectorAll("[data-actor-id]")].every(c => c.checked);
-        if (allChk) allChk.checked = all;
-      });
-    });
-
-    // WYSIWYG
-    const editor = form.querySelector("#cgm-pt-desc");
-    form.querySelectorAll("[data-cmd]").forEach(btn => {
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const cmd = btn.dataset.cmd;
-        editor.focus();
-        if (cmd === "h3") document.execCommand("formatBlock", false, "<h3>");
-        else document.execCommand(cmd, false, null);
-      });
-    });
-
-    const _close = () => {
-      form.classList.remove("is-open");
-      form.classList.add("is-closing");
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      form.addEventListener("transitionend", () => wrapper.remove(), { once: true });
-    };
-    form.querySelector("#cgm-pt-form-close")?.addEventListener("click", (e) => { e.stopPropagation(); _close(); });
-
-    form.querySelector("#cgm-pt-save")?.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const name = form.querySelector("#cgm-pt-name").value.trim();
-      const description = editor.innerHTML.trim();
-      const selectedIds = [...form.querySelectorAll("[data-actor-id]:checked")].map(cb => cb.dataset.actorId);
-
-      if (!name) { ui.notifications.warn("Please enter a task name."); return; }
-      if (selectedIds.length === 0) { ui.notifications.warn("Select at least one player."); return; }
-
-      const taskId = existingTask?.id || foundry.utils.randomID();
-      const taskData = {
-        id: taskId,
-        name,
-        priority: selectedPrio,
-        description,
-        solved: existingTask?.solved ?? false,
-        approvalPending: existingTask?.approvalPending ?? false,
-        createdAt: existingTask?.createdAt || Date.now(),
-        createdBy: "gm",
-        delegatedBy: game.user.name,
-        delegatedTo: selectedIds
-      };
-
-      // Remove from actors no longer selected
-      if (existingTask) {
-        const removed = existingTask._actorIds.filter(id => !selectedIds.includes(id));
-        for (const actorId of removed) {
-          const actor = game.actors.get(actorId);
-          if (!actor) continue;
-          const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
-          const filtered = tasks.filter(t => t.id !== taskId);
-          if (filtered.length !== tasks.length) await actor.setFlag("cypher-taskbar", "myTasks", filtered);
-        }
-      }
-
-      // Write to all selected actors
-      for (const actorId of selectedIds) {
-        const actor = game.actors.get(actorId);
-        if (!actor) continue;
-        const tasks = actor.getFlag("cypher-taskbar", "myTasks") ?? [];
-        const idx = tasks.findIndex(t => t.id === taskId);
-        if (idx >= 0) tasks[idx] = { ...tasks[idx], ...taskData };
-        else tasks.push(taskData);
-        await actor.setFlag("cypher-taskbar", "myTasks", tasks);
-      }
-
-      _close();
-      const list = document.querySelector("#cgm-pt-list");
-      if (list) {
-        const activeTab = document.querySelector(".cgm-pt-tab.is-active")?.dataset.tab || "active";
-        this._renderPTList(list, activeTab);
-      }
-      ui.notifications.info(`Task "${name}" ${existingTask ? 'updated' : 'delegated'} to ${selectedIds.length} player${selectedIds.length !== 1 ? 's' : ''}.`);
-    });
-  }
-
-  /** Refresh the Player Tasks panel (called from socket) */
-  _refreshPlayerTasksPanel() {
-    const list = document.querySelector("#cgm-pt-list");
-    if (!list) return;
-    const tab = document.querySelector(".cgm-pt-tab.is-active")?.dataset.tab || "active";
-    this._renderPTList(list, tab);
-  }
-
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -14634,6 +13785,8 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "xpCircleOffsetX", { name: "XP Circle Offset X", hint: "Horizontal offset of XP circle (negative = left).", scope: "client", config: false, type: Number, default: 0, range: { min: -50, max: 50, step: 2 } });
   game.settings.register(MODULE_ID, "xpCircleOffsetY", { name: "XP Circle Offset Y", hint: "Vertical offset of XP circle (negative = up).", scope: "client", config: false, type: Number, default: 4, range: { min: -50, max: 50, step: 2 } });
   game.settings.register(MODULE_ID, "globalDifficulty", { name: "Global Difficulty", hint: "Default difficulty for all player rolls.", scope: "world", config: false, type: Number, default: 4, range: { min: 0, max: 15, step: 1 } });
+  game.settings.register(MODULE_ID, "globalAssets", { name: "Global GM Assets", hint: "Party-wide asset modifier applied to every PC's rolls (stacks with per-portrait pills).", scope: "world", config: false, type: Number, default: 0, range: { min: 0, max: 2, step: 1 } });
+  game.settings.register(MODULE_ID, "globalHinders", { name: "Global GM Hindrance", hint: "Party-wide hindrance modifier applied to every PC's rolls (stacks with per-portrait pills).", scope: "world", config: false, type: Number, default: 0, range: { min: 0, max: 6, step: 1 } });
   game.settings.register(MODULE_ID, "radialMenuSize", { name: "Radial Menu Size", hint: "Size of the radial menu in pixels.", scope: "client", config: false, type: Number, default: 200, range: { min: 100, max: 300, step: 10 } });
   game.settings.register(MODULE_ID, "radialMenuOffset", { name: "Radial Menu Offset", hint: "Distance from portrait to menu in pixels.", scope: "client", config: false, type: Number, default: 20, range: { min: 10, max: 100, step: 5 } });
   game.settings.register(MODULE_ID, "disableGMTaskbar", { name: "Never Load GM Taskbar", hint: "If enabled, the GM Taskbar will not appear for this user. Requires reload.", scope: "client", config: true, type: Boolean, default: false });
@@ -14672,11 +13825,9 @@ function registerSettings() {
   game.settings.register(MODULE_ID, "playerStash", { name: "Player Stash", hint: "UUID reference to the Item Piles container designated as the player stash.", scope: "world", config: false, type: Object, default: {} });
   game.settings.register(MODULE_ID, "playerSettingsLastMenu", { name: "Player Settings Last Menu", hint: "Last opened submenu in the Player Settings menu.", scope: "client", config: false, type: String, default: "" });
   game.settings.register(MODULE_ID, "itemsCanvasData", { name: "Items Canvas Data", hint: "Stores Items canvas tabs and tokens.", scope: "world", config: false, type: String, default: "{}" });
-  game.settings.register(MODULE_ID, "galleryCanvasData", { name: "Gallery Canvas Data", hint: "Stores Gallery canvas tabs and media.", scope: "world", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "menuPositions", { name: "Menu Positions", hint: "Saved positions for draggable radial menus (JSON).", scope: "client", config: false, type: String, default: "{}" });
   game.settings.register(MODULE_ID, "gmMenuDocs", { name: "GM Menu Documents", hint: "Journal UUIDs stored in GM menu sections (JSON).", scope: "world", config: false, type: String, default: "{\"shared\":[],\"gm\":[],\"notes\":[]}" });
   game.settings.register(MODULE_ID, "randomPanelData", { name: "Random Panel Data", hint: "Journal entries stored in Random panel grid (JSON array).", scope: "world", config: false, type: String, default: "[]" });
-  game.settings.register(MODULE_ID, "playerSheets", { name: "Player Sheets", hint: "Uploaded HTML character sheets per actor (JSON).", scope: "world", config: false, type: String, default: "{}" });
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -14750,9 +13901,7 @@ Hooks.once("ready", () => {
   // Listen for Cypher XP player spend requests + player attack outcomes
   game.socket.on("module.cypher-taskbar", (payload) => {
     console.log(`[CGM] Socket received:`, payload);
-    if (payload?.type === "intrusionOutcome" && game.user?.isGM) {
-      window.cypherGMTaskbar?._logIntrusionOutcome?.(payload);
-    } else if (payload?.type === "gmXpSpendRequest" && game.user?.isGM) {
+    if (payload?.type === "gmXpSpendRequest" && game.user?.isGM) {
       console.log(`[CGM] Handling gmXpSpendRequest for actor:`, payload.actorName);
       window.cypherGMTaskbar?._openGMXpSpendRequest?.(payload);
     } else if (payload?.type === "gmAttackOutcomeRequest" && game.user?.isGM) {
@@ -14964,31 +14113,6 @@ Hooks.on("ready", () => {
     }
 
     console.log("[CypherGMTaskbar] SOCKET EVENT (raw):", data, "| my userId:", game.user?.id);
-
-    // Player Tasks — approval request (GM sees all, no userId filter)
-    if (data?.action === "taskApprovalRequest" && game.user.isGM) {
-      const actorName = data.actorName || "Unknown";
-      const taskName = data.taskName || "Task";
-      ui.notifications.info(`<i class="fas fa-hourglass-half"></i> ${actorName} marked "${taskName}" for approval.`, { permanent: false });
-      // Refresh the Player Tasks panel if open
-      if (window.cypherGMTaskbar) {
-        window.cypherGMTaskbar._refreshPlayerTasksPanel?.();
-      }
-      return;
-    }
-
-    // Gallery media show-to-players broadcast (reaches players —
-    // registered BEFORE the userId filter below, same as taskApprovalRequest).
-    // When data.targets is set, only those users see it; otherwise all players.
-    if (data?.action === "galleryShow" && !game.user.isGM) {
-      if (!data.targets || data.targets.includes(game.user.id)) {
-        if (typeof window.cypherShowGalleryMedia === "function") {
-          window.cypherShowGalleryMedia({ src: data.src, name: data.name, mediaType: data.mediaType });
-        }
-      }
-      return;
-    }
-
     if (data.userId !== game.user?.id) {
       console.log("[CypherGMTaskbar] SKIPPED — wrong userId. Expected:", data.userId, "Got:", game.user?.id);
       return;
@@ -15085,10 +14209,6 @@ Hooks.on("ready", () => {
 
     /* ─── Intrusion ─── */
     else if (data.action === "requestIntrusion") {
-      // Cypher Taskbar (player module) shows its own dramatic portrait
-      // banner — skip this fallback dialog to avoid double prompts.
-      if (game.modules.get("cypher-taskbar")?.active && window.CypherTaskbar?.instance) return;
-
       console.log(`[CypherGMTaskbar] Intrusion request for ${actor.name}`);
       ui.notifications.warn(`GM Intrusion on ${actor.name}!`, { permanent: true });
 
@@ -15123,16 +14243,6 @@ Hooks.on("ready", () => {
         }
       }
       async function _sendIntrusionChat(a, accepted, gaveXPTo = null) {
-        // Report the outcome back to the GM (intrusions panel log)
-        game.socket.emit("module.cypher-taskbar", {
-          type: "intrusionOutcome",
-          actorId: a?.id,
-          actorName: a?.name || "Unknown",
-          userId: game.user.id,
-          userName: game.user.name,
-          accepted,
-          gaveToName: gaveXPTo?.name ?? null
-        });
         const actorImg = a?.img || "icons/svg/mystery-man.svg";
         const actorName = a?.name || "Unknown";
         const acceptedColor = accepted ? "#40b060" : "#ff7070";
@@ -15166,7 +14276,7 @@ Hooks.on("ready", () => {
           <div class="cgm-intrusion-dialog">
             <div class="cgm-intrusion-portrait-bg" style="background-image:url('${img}');"></div>
             <div class="cgm-intrusion-header"><i class="fas fa-bolt" style="margin-right:6px;"></i>GM Intrusion</div>
-            <div class="cgm-intrusion-flavor">${data.description ? foundry.utils.escapeHTML(data.description) : "Let's make this interesting."}</div>
+            <div class="cgm-intrusion-flavor">Let's make this interesting.</div>
             <div class="cgm-intrusion-question">Do you accept GM's <strong>INTRUSION</strong>?</div>
             <div class="cgm-intrusion-target"><i class="fas fa-crosshairs"></i> Target: <strong>${name}</strong></div>
           </div>`,
@@ -15281,29 +14391,12 @@ Hooks.on("updateActor", (actor, data, options, userId) => {
   }, 250);
 });
 
-/* NPC Canvas: keep canvas tokens in sync when an actor's image changes
- * (portrait or prototype token texture — whichever was edited on the sheet) */
-Hooks.on("updateActor", (actor, data, options, userId) => {
-  if (!game.user?.isGM) return;
-  if (!game.settings.get(MODULE_ID, "npcCanvasData")) return; // canvas never used
-  if (!window.cypherNPCCanvas) window.cypherNPCCanvas = new NPCCanvas();
-  window.cypherNPCCanvas.syncActorImage?.(actor, data);
-});
-
 /* Refresh portraits when items change on actors (cyphers, artifacts) */
 Hooks.on("createItem", (item, options, userId) => {
   if (!game.user?.isGM) return;
   const actor = item.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
-  // PLAYER ATTACKS sync: a new attack on a PC's sheet joins the pinned list
-  // (no-op while pinning is unused — flag unset means "show all attacks").
-  if (item.type === "attack") {
-    const ids = actor.getFlag?.("cypher-taskbar", "pinnedAttacks");
-    if (Array.isArray(ids) && !ids.includes(item.id)) {
-      actor.setFlag("cypher-taskbar", "pinnedAttacks", [...ids, item.id]).catch(() => {});
-    }
-  }
   if (window.cypherGMTaskbar._partyDataCache) {
     window.cypherGMTaskbar._partyDataCache = null;
   }
@@ -15318,13 +14411,6 @@ Hooks.on("deleteItem", (item, options, userId) => {
   const actor = item.parent;
   if (!actor || actor.type !== "pc" || !actor.hasPlayerOwner) return;
   if (!window.cypherGMTaskbar) return;
-  // PLAYER ATTACKS sync: drop deleted attacks from the pinned list.
-  if (item.type === "attack") {
-    const ids = actor.getFlag?.("cypher-taskbar", "pinnedAttacks");
-    if (Array.isArray(ids) && ids.includes(item.id)) {
-      actor.setFlag("cypher-taskbar", "pinnedAttacks", ids.filter(x => x !== item.id)).catch(() => {});
-    }
-  }
   if (window.cypherGMTaskbar._partyDataCache) {
     window.cypherGMTaskbar._partyDataCache = null;
   }
